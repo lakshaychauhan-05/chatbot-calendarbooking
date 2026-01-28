@@ -3,14 +3,15 @@ Availability Service - calculates available slots from database.
 Database is the single source of truth for availability.
 """
 from datetime import date, time, datetime, timedelta
-from typing import List
+from typing import List, Optional, Dict
+from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from app.models.doctor import Doctor
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.doctor_leave import DoctorLeave
 from app.schemas.appointment import AvailabilitySlot, AvailabilityResponse
-import calendar
+from collections import defaultdict
 
 
 class AvailabilityService:
@@ -91,7 +92,7 @@ class AvailabilityService:
         booked_appointments = db.query(Appointment).filter(
             Appointment.doctor_email == doctor_email,  # Changed to email
             Appointment.date == target_date,
-            Appointment.status == AppointmentStatus.BOOKED
+            Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED])
         ).all()
         
         # Create set of booked time ranges for quick lookup
@@ -118,6 +119,90 @@ class AvailabilityService:
             available_slots=available_slots,
             total_slots=len(available_slots)
         )
+
+    @staticmethod
+    def get_available_slots_for_doctors(
+        db: Session,
+        doctors: List[Doctor],
+        target_date: date
+    ) -> Dict[str, AvailabilityResponse]:
+        """
+        Batch calculate available slots for multiple doctors on a specific date.
+        Avoids N+1 appointment queries.
+        """
+        if not doctors:
+            return {}
+
+        doctor_emails = [doctor.email for doctor in doctors]
+
+        booked_appointments = db.query(Appointment).filter(
+            Appointment.doctor_email.in_(doctor_emails),
+            Appointment.date == target_date,
+            Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED])
+        ).all()
+
+        booked_by_doctor = defaultdict(list)
+        for apt in booked_appointments:
+            booked_by_doctor[apt.doctor_email].append((apt.start_time, apt.end_time))
+
+        leaves = db.query(DoctorLeave).filter(
+            DoctorLeave.doctor_email.in_(doctor_emails),
+            DoctorLeave.date == target_date
+        ).all()
+        leave_set = {leave.doctor_email for leave in leaves}
+
+        results: Dict[str, AvailabilityResponse] = {}
+        for doctor in doctors:
+            if not doctor.is_active:
+                continue
+
+            day_name = target_date.strftime("%A").lower()
+            if day_name not in [day.lower() for day in doctor.working_days]:
+                results[doctor.email] = AvailabilityResponse(
+                    doctor_id=doctor.email,
+                    date=target_date,
+                    available_slots=[],
+                    total_slots=0
+                )
+                continue
+
+            if doctor.email in leave_set:
+                results[doctor.email] = AvailabilityResponse(
+                    doctor_id=doctor.email,
+                    date=target_date,
+                    available_slots=[],
+                    total_slots=0
+                )
+                continue
+
+            working_start = datetime.strptime(doctor.working_hours["start"], "%H:%M").time()
+            working_end = datetime.strptime(doctor.working_hours["end"], "%H:%M").time()
+
+            all_slots = AvailabilityService._generate_slots(
+                working_start,
+                working_end,
+                doctor.slot_duration_minutes
+            )
+
+            booked_ranges = booked_by_doctor.get(doctor.email, [])
+            available_slots = []
+            for slot in all_slots:
+                is_booked = False
+                for booked_start, booked_end in booked_ranges:
+                    if not (slot.end_time <= booked_start or slot.start_time >= booked_end):
+                        is_booked = True
+                        break
+                if not is_booked:
+                    available_slots.append(slot)
+
+            results[doctor.email] = AvailabilityResponse(
+                doctor_id=doctor.email,
+                date=target_date,
+                available_slots=available_slots,
+                total_slots=len(available_slots)
+            )
+
+        return results
     
     @staticmethod
     def _generate_slots(
@@ -164,7 +249,8 @@ class AvailabilityService:
         doctor_email: str,  # Changed to email
         slot_date: date,
         slot_start_time: time,
-        slot_end_time: time
+        slot_end_time: time,
+        exclude_appointment_id: Optional[UUID] = None
     ) -> bool:
         """
         Check if a specific slot is available.
@@ -220,16 +306,20 @@ class AvailabilityService:
             return False
         
         # Check for overlapping appointments
-        overlapping = db.query(Appointment).filter(
+        overlapping_query = db.query(Appointment).filter(
             Appointment.doctor_email == doctor_email,  # Changed to email
             Appointment.date == slot_date,
-            Appointment.status == AppointmentStatus.BOOKED,
+            Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED]),
             or_(
                 and_(
                     Appointment.start_time < slot_end_time,
                     Appointment.end_time > slot_start_time
                 )
             )
-        ).first()
+        )
+        if exclude_appointment_id:
+            overlapping_query = overlapping_query.filter(Appointment.id != exclude_appointment_id)
+
+        overlapping = overlapping_query.first()
         
         return overlapping is None

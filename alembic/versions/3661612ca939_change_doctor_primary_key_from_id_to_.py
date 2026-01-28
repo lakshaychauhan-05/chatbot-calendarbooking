@@ -23,33 +23,105 @@ def upgrade() -> None:
     # For existing databases, this is a destructive change that requires data migration
     # In a production environment, you would need to carefully migrate existing data
 
-    # Step 1: Drop existing foreign key constraints
-    op.drop_constraint('appointments_doctor_id_fkey', 'appointments', type_='foreignkey')
-    op.drop_constraint('doctor_leaves_doctor_id_fkey', 'doctor_leaves', type_='foreignkey')
-    op.drop_constraint('calendar_watches_doctor_id_fkey', 'calendar_watches', type_='foreignkey')
+    # Step 1: Drop existing foreign key constraints (if they exist)
+    op.execute("ALTER TABLE appointments DROP CONSTRAINT IF EXISTS appointments_doctor_id_fkey")
+    op.execute("ALTER TABLE doctor_leaves DROP CONSTRAINT IF EXISTS doctor_leaves_doctor_id_fkey")
+    op.execute("ALTER TABLE calendar_watches DROP CONSTRAINT IF EXISTS calendar_watches_doctor_id_fkey")
+    op.execute("ALTER TABLE appointments DROP CONSTRAINT IF EXISTS appointments_doctor_email_fkey")
+    op.execute("ALTER TABLE doctor_leaves DROP CONSTRAINT IF EXISTS doctor_leaves_doctor_email_fkey")
+    op.execute("ALTER TABLE calendar_watches DROP CONSTRAINT IF EXISTS calendar_watches_doctor_email_fkey")
 
     # Step 2: Drop existing primary key constraint
-    op.drop_constraint('doctors_pkey', 'doctors', type_='primary')
+    op.execute("ALTER TABLE doctors DROP CONSTRAINT IF EXISTS doctors_pkey")
 
-    # Step 3: Add new columns to handle the transition
-    op.add_column('appointments', sa.Column('doctor_email_new', sa.String(255), nullable=True))
-    op.add_column('doctor_leaves', sa.Column('doctor_email_new', sa.String(255), nullable=True))
-    op.add_column('calendar_watches', sa.Column('doctor_email_new', sa.String(255), nullable=True))
+    # Step 3: Add new columns to handle the transition (if missing)
+    op.execute("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_email_new VARCHAR(255)")
+    op.execute("ALTER TABLE doctor_leaves ADD COLUMN IF NOT EXISTS doctor_email_new VARCHAR(255)")
+    op.execute("ALTER TABLE calendar_watches ADD COLUMN IF NOT EXISTS doctor_email_new VARCHAR(255)")
 
     # Step 4: For this migration, we'll assume the database is being rebuilt
     # In production, you would need to map existing UUIDs to email addresses
     # For now, we'll clean up and recreate the schema
 
-    # Step 5: Drop old columns
-    op.drop_column('appointments', 'doctor_id')
-    op.drop_column('doctor_leaves', 'doctor_id')
-    op.drop_column('calendar_watches', 'doctor_id')
-    op.drop_column('doctors', 'id')
+    # Step 5: Drop old columns (if they exist)
+    op.execute("ALTER TABLE appointments DROP COLUMN IF EXISTS doctor_id")
+    op.execute("ALTER TABLE doctor_leaves DROP COLUMN IF EXISTS doctor_id")
+    op.execute("ALTER TABLE calendar_watches DROP COLUMN IF EXISTS doctor_id")
+    op.execute("ALTER TABLE doctors DROP COLUMN IF EXISTS id")
 
-    # Step 6: Rename new columns to final names
-    op.alter_column('appointments', 'doctor_email_new', new_column_name='doctor_email')
-    op.alter_column('doctor_leaves', 'doctor_email_new', new_column_name='doctor_email')
-    op.alter_column('calendar_watches', 'doctor_email_new', new_column_name='doctor_email')
+    # Step 6: Rename new columns to final names when needed
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'appointments' AND column_name = 'doctor_email_new'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'appointments' AND column_name = 'doctor_email'
+            ) THEN
+                ALTER TABLE appointments RENAME COLUMN doctor_email_new TO doctor_email;
+            ELSIF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'appointments' AND column_name = 'doctor_email_new'
+            ) AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'appointments' AND column_name = 'doctor_email'
+            ) THEN
+                ALTER TABLE appointments DROP COLUMN doctor_email_new;
+            END IF;
+        END $$;
+        """
+    )
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'doctor_leaves' AND column_name = 'doctor_email_new'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'doctor_leaves' AND column_name = 'doctor_email'
+            ) THEN
+                ALTER TABLE doctor_leaves RENAME COLUMN doctor_email_new TO doctor_email;
+            ELSIF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'doctor_leaves' AND column_name = 'doctor_email_new'
+            ) AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'doctor_leaves' AND column_name = 'doctor_email'
+            ) THEN
+                ALTER TABLE doctor_leaves DROP COLUMN doctor_email_new;
+            END IF;
+        END $$;
+        """
+    )
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'calendar_watches' AND column_name = 'doctor_email_new'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'calendar_watches' AND column_name = 'doctor_email'
+            ) THEN
+                ALTER TABLE calendar_watches RENAME COLUMN doctor_email_new TO doctor_email;
+            ELSIF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'calendar_watches' AND column_name = 'doctor_email_new'
+            ) AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'calendar_watches' AND column_name = 'doctor_email'
+            ) THEN
+                ALTER TABLE calendar_watches DROP COLUMN doctor_email_new;
+            END IF;
+        END $$;
+        """
+    )
 
     # Step 7: Make email the primary key for doctors
     op.create_primary_key('doctors_pkey', 'doctors', ['email'])

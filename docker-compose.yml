@@ -25,10 +25,15 @@ services:
       context: .
       dockerfile: Dockerfile.calendar
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/appointment_db
-      DEBUG: "true"
-      SECRET_KEY: "dev-secret-key"
-      GOOGLE_CREDENTIALS_PATH: "/app/appointment-service-484808-b285efa3864f.json"
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:password@postgres:5432/appointment_db}
+      DEBUG: ${DEBUG:-false}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:-}
+      SERVICE_API_KEYS: ${SERVICE_API_KEYS:-}
+      GOOGLE_CALENDAR_CREDENTIALS_PATH: ${GOOGLE_CALENDAR_CREDENTIALS_PATH:-/app/appointment-service-484808-b285efa3864f.json}
+      GOOGLE_CALENDAR_DELEGATED_ADMIN_EMAIL: ${GOOGLE_CALENDAR_DELEGATED_ADMIN_EMAIL:-}
+      WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:-http://localhost:8000}
+      GOOGLE_CALENDAR_WEBHOOK_SECRET: ${GOOGLE_CALENDAR_WEBHOOK_SECRET:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000}
     ports:
       - "8000:8000"
     volumes:
@@ -49,10 +54,11 @@ services:
       dockerfile: Dockerfile
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      CALENDAR_SERVICE_URL: http://calendar-service:8000
-      CALENDAR_SERVICE_API_KEY: dev-api-key
-      DEBUG: "true"
-      REDIS_URL: redis://redis:6379
+      CALENDAR_SERVICE_URL: ${CALENDAR_SERVICE_URL:-http://calendar-service:8000}
+      CALENDAR_SERVICE_API_KEY: ${CALENDAR_SERVICE_API_KEY:-}
+      DEBUG: ${DEBUG:-false}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      CORS_ALLOW_ORIGINS: ${CHATBOT_CORS_ALLOW_ORIGINS:-http://localhost:3000}
     ports:
       - "8001:8001"
     depends_on:
@@ -83,7 +89,7 @@ services:
       context: ./chatbot-frontend
       dockerfile: Dockerfile
     environment:
-      REACT_APP_API_URL: http://localhost:8001
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:8001}
     ports:
       - "3000:3000"
     depends_on:

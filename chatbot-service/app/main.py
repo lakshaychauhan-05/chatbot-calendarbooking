@@ -5,10 +5,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.routes import chat, health
+from app.utils.rate_limit import rate_limiter
+from fastapi import Depends
+from app.middleware.request_id import request_id_middleware, RequestIdFilter
 import logging
 
 # Setup logging
-logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG)
+logging.basicConfig(
+    level=logging.INFO if not settings.DEBUG else logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(request_id)s - %(message)s"
+)
+root_logger = logging.getLogger()
+for handler in root_logger.handlers:
+    handler.addFilter(RequestIdFilter())
+root_logger.addFilter(RequestIdFilter())
 logger = logging.getLogger(__name__)
 
 # Create FastAPI app
@@ -20,10 +30,19 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Request ID middleware
+app.middleware("http")(request_id_middleware)
+
 # CORS middleware
+cors_origins = []
+if settings.CORS_ALLOW_ORIGINS:
+    cors_origins = [origin.strip() for origin in settings.CORS_ALLOW_ORIGINS.split(",") if origin.strip()]
+elif settings.DEBUG:
+    cors_origins = ["http://localhost:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,7 +50,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(health.router, prefix="/api/v1/health", tags=["Health"])
-app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat"])
+app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat"], dependencies=[Depends(rate_limiter)])
 
 
 @app.get("/")

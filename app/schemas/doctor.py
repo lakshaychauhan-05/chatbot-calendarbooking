@@ -20,6 +20,7 @@ class DoctorBase(BaseModel):
     working_days: List[str] = Field(..., min_items=1)  # e.g., ["monday", "tuesday"]
     working_hours: dict = Field(..., description="Working hours with start and end times")  # {"start": "09:00", "end": "17:00"}
     slot_duration_minutes: int = Field(default=30, ge=5, le=120)
+    timezone: str = Field(default="UTC", max_length=64)
 
 
 class DoctorCreate(DoctorBase):
@@ -38,6 +39,7 @@ class DoctorUpdate(BaseModel):
     working_days: Optional[List[str]] = Field(None, min_items=1)
     working_hours: Optional[dict] = None
     slot_duration_minutes: Optional[int] = Field(None, ge=5, le=120)
+    timezone: Optional[str] = Field(None, max_length=64)
     is_active: Optional[bool] = None
 
 

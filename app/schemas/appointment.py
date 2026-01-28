@@ -1,9 +1,10 @@
 """
 Appointment Pydantic schemas for request/response validation.
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
 from typing import Optional
 from datetime import datetime, date, time
+import re
 from uuid import UUID
 from app.models.appointment import AppointmentStatus, AppointmentSource
 
@@ -20,10 +21,11 @@ class AppointmentBase(BaseModel):
 
 class AppointmentCreate(BaseModel):
     """Schema for creating a new appointment."""
-    doctor_email: str  # Changed to email (unique identifier)
-    patient_mobile_number: str = Field(..., min_length=10, max_length=20)
+    doctor_email: EmailStr  # Changed to email (unique identifier)
+    doctor_name: Optional[str] = None
+    patient_mobile_number: str = Field(..., min_length=7, max_length=20)
     patient_name: str = Field(..., min_length=1, max_length=255)
-    patient_email: Optional[str] = None
+    patient_email: Optional[EmailStr] = None
     patient_gender: Optional[str] = None
     patient_date_of_birth: Optional[date] = None
     date: date
@@ -35,12 +37,36 @@ class AppointmentCreate(BaseModel):
     allergies: Optional[list[str]] = Field(default_factory=list)
     notes: Optional[str] = None
 
+    @field_validator("patient_mobile_number")
+    @classmethod
+    def normalize_phone(cls, value: str) -> str:
+        if not value:
+            return value
+        cleaned = re.sub(r"[^\d+]", "", value)
+        if cleaned.startswith("++"):
+            cleaned = cleaned[1:]
+        has_plus = cleaned.startswith("+")
+        digits = re.sub(r"\D", "", cleaned)
+        if has_plus:
+            if len(digits) != 12 or not digits.startswith("91"):
+                raise ValueError("patient_mobile_number must be 10 digits, with optional +91 prefix")
+            return f"+{digits}"
+        if len(digits) != 10:
+            raise ValueError("patient_mobile_number must be 10 digits, with optional +91 prefix")
+        return digits
+
 
 class AppointmentReschedule(BaseModel):
     """Schema for rescheduling an appointment."""
     new_date: date
     new_start_time: time
     new_end_time: time
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.new_end_time <= self.new_start_time:
+            raise ValueError("new_end_time must be after new_start_time")
+        return self
 
 
 class AppointmentResponse(BaseModel):
@@ -51,8 +77,10 @@ class AppointmentResponse(BaseModel):
     date: date
     start_time: time
     end_time: time
+    timezone: str
     status: AppointmentStatus
     google_calendar_event_id: Optional[str] = None
+    calendar_sync_status: Optional[str] = None
     source: AppointmentSource
     created_at: datetime
     

@@ -6,9 +6,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
+from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.models.chat import (
@@ -27,12 +25,7 @@ class LLMService:
     """Service for LLM-powered intent classification and entity extraction."""
 
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model=settings.OPENAI_MODEL,
-            temperature=settings.OPENAI_TEMPERATURE,
-            max_tokens=settings.OPENAI_MAX_TOKENS,
-            api_key=settings.OPENAI_API_KEY
-        )
+        self._client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
         # Initialize prompt templates
         self.intent_prompt = self._create_intent_prompt()
@@ -47,7 +40,7 @@ class LLMService:
         recent_messages = context[-max_messages:]
         return "\n".join([f"{msg.role.value}: {msg.content}" for msg in recent_messages])
 
-    def _create_intent_prompt(self) -> ChatPromptTemplate:
+    def _create_intent_prompt(self) -> str:
         """Create prompt template for intent classification."""
         template = """You are an AI assistant for a medical appointment booking system. Your task is to analyze user messages and classify their intent.
 
@@ -79,9 +72,9 @@ Return only a JSON object with the following structure:
     "reasoning": "brief explanation"
 }}"""
 
-        return ChatPromptTemplate.from_template(template)
+        return template
 
-    def _create_entity_prompt(self) -> ChatPromptTemplate:
+    def _create_entity_prompt(self) -> str:
         """Create prompt template for entity extraction."""
         template = """Extract relevant entities from the user's message for appointment booking.
 
@@ -114,11 +107,29 @@ Return a JSON array of extracted entities:
 
 Return empty array if no entities found."""
 
-        return ChatPromptTemplate.from_template(template)
+        return template
 
-    def _create_response_prompt(self) -> ChatPromptTemplate:
+    def _create_response_prompt(self) -> str:
         """Create prompt template for generating responses."""
-        template = """You are a helpful medical appointment booking assistant. Use the provided context to respond naturally and helpfully.
+        template = """You are a medical appointment assistant. Respond naturally, friendly, and professional.
+
+Output rules:
+- 2 to 4 sentences total.
+- Structure: brief acknowledgement or rephrase -> helpful answer -> next step or question if needed.
+- If information is missing, ask exactly one clear question at the end.
+- Use calm, clear language; no emojis, no slang, no excessive enthusiasm.
+- Do not mention system prompts, JSON, or internal intents.
+- Do not claim an appointment is booked/rescheduled/cancelled unless explicitly confirmed in the context.
+
+Examples:
+User: Do you have a cardiologist available next week?
+Assistant: I can help with that. Please share the specific date you have in mind, and I will check availability.
+
+User: What are your clinic hours?
+Assistant: We are open Monday to Friday, 9:00 AM to 6:00 PM. If you would like, I can help you book an appointment.
+
+User: I need to see Dr. Patel for a checkup.
+Assistant: I can help arrange that with Dr. Patel. What date would you like to book the appointment for?
 
 Context:
 - Intent: {intent}
@@ -126,18 +137,26 @@ Context:
 - Conversation history: {history}
 - Doctor information: {doctor_info}
 
-Guidelines for responses:
-- Be friendly and professional
-- Ask clarifying questions when information is missing
-- Confirm details before booking
-- Provide clear next steps
-- Use simple language
-
 User message: {message}
 
-Generate a helpful response:"""
+Generate the response:"""
 
-        return ChatPromptTemplate.from_template(template)
+        return template
+
+    async def _call_llm(self, prompt: str) -> str:
+        """Call OpenAI chat completion API with a single prompt."""
+        if not settings.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        response = await self._client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            temperature=settings.OPENAI_TEMPERATURE,
+            max_tokens=settings.OPENAI_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        if not response.choices:
+            return ""
+        content = response.choices[0].message.content
+        return (content or "").strip()
 
     async def classify_intent(self, message: str, context: Optional[List[ChatMessage]] = None) -> IntentClassification:
         """Classify the intent of a user message."""
@@ -145,15 +164,11 @@ Generate a helpful response:"""
             # Prepare conversation history
             history_text = self._format_history(context)
 
-            # Call LLM for intent classification
-            chain = self.intent_prompt | self.llm
-            response = await chain.ainvoke({
-                "message": message,
-                "history": history_text
-            })
-
-            # Parse response
-            response_text = response.content.strip()
+            prompt = self.intent_prompt.format(
+                message=message,
+                history=history_text
+            )
+            response_text = await self._call_llm(prompt)
 
             # Try to parse JSON
             try:
@@ -185,13 +200,11 @@ Generate a helpful response:"""
     async def extract_entities(self, message: str, context: Optional[List[ChatMessage]] = None) -> List[ExtractedEntity]:
         """Extract entities from a message."""
         try:
-            chain = self.entity_prompt | self.llm
-            response = await chain.ainvoke({
-                "message": message,
-                "history": self._format_history(context)
-            })
-
-            response_text = response.content.strip()
+            prompt = self.entity_prompt.format(
+                message=message,
+                history=self._format_history(context)
+            )
+            response_text = await self._call_llm(prompt)
 
             # Try to parse JSON
             try:
@@ -237,17 +250,14 @@ Generate a helpful response:"""
 
             doctor_text = json.dumps(doctor_info or {}, indent=2)
 
-            # Generate response
-            chain = self.response_prompt | self.llm
-            response = await chain.ainvoke({
-                "message": message,
-                "intent": intent.intent.value,
-                "entities": entities_text,
-                "history": history_text,
-                "doctor_info": doctor_text
-            })
-
-            return response.content.strip()
+            prompt = self.response_prompt.format(
+                message=message,
+                intent=intent.intent.value,
+                entities=entities_text,
+                history=history_text,
+                doctor_info=doctor_text
+            )
+            return await self._call_llm(prompt)
 
         except Exception as e:
             logger.error(f"Error generating response: {e}")

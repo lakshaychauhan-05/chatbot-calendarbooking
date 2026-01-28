@@ -3,12 +3,15 @@ Main Chat Service that orchestrates LLM, calendar client, and conversation manag
 """
 import logging
 import re
-import time as time_module
 import traceback
+import json
+import hashlib
 from difflib import get_close_matches
 from typing import Dict, List, Any, Optional
 from datetime import datetime, date, timedelta, time as dt_time
 from dateutil import parser as date_parser
+
+import redis
 
 from app.core.config import settings
 from app.models.chat import (
@@ -33,6 +36,7 @@ class ChatService:
 
     BOOKING_CONTEXT_FIELDS = (
         "appointment_id",
+        "selected_doctor_email",
         "doctor_email",
         "doctor_name",
         "specialization",
@@ -50,7 +54,15 @@ class ChatService:
     def __init__(self):
         self.llm_service = LLMService()
         self.conversation_manager = ConversationManager()
-        self._doctor_cache: Dict[str, Any] = {"timestamp": 0.0, "data": []}
+        self._redis = None
+        if settings.REDIS_URL:
+            try:
+                self._redis = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+                self._redis.ping()
+            except Exception as e:
+                logger.warning(f"Redis unavailable, caching disabled: {e}")
+                self._redis = None
+        self._doctor_cache_key = "doctor_data_cache"
         self._doctor_cache_ttl_seconds = 300
 
     async def process_message(self, request: ChatRequest) -> ChatResponse:
@@ -126,6 +138,35 @@ class ChatService:
                 intent_classification
             )
 
+            # Guard: keep user inside booking flow until completed
+            if conversation and conversation.state in [
+                ConversationState.GATHERING_INFO,
+                ConversationState.CONFIRMING_BOOKING,
+                ConversationState.BOOKING_APPOINTMENT
+            ]:
+                if intent_classification.intent not in [
+                    IntentType.CANCEL_APPOINTMENT,
+                    IntentType.RESCHEDULE_APPOINTMENT
+                ]:
+                    logger.info(
+                        "Forcing booking intent due to active booking state",
+                        extra={"conversation_id": conversation_id}
+                    )
+                    intent_classification.intent = IntentType.BOOK_APPOINTMENT
+
+            # Auto-transition from availability -> booking when time is provided
+            if conversation:
+                availability_date = conversation.context.get("availability_date")
+                last_doctor_name = conversation.context.get("last_doctor_name")
+                availability_specialization = conversation.context.get("availability_specialization")
+                if availability_date and self._extract_time_from_text(request.message):
+                    if last_doctor_name or availability_specialization:
+                        logger.info(
+                            "Auto-transitioning to booking from availability",
+                            extra={"conversation_id": conversation_id}
+                        )
+                        intent_classification.intent = IntentType.BOOK_APPOINTMENT
+
             # Get doctor data only when needed
             doctor_data: List[Dict[str, Any]] = []
             if self._needs_doctor_data(intent_classification.intent):
@@ -143,6 +184,18 @@ class ChatService:
             except Exception as e:
                 logger.exception(f"Error generating response: {e}")
                 response_text = "I'm sorry, I ran into an issue while responding. Please try again."
+
+            # Safety: prevent LLM responses from claiming a booking without an API call
+            if intent_classification.intent not in [
+                IntentType.BOOK_APPOINTMENT,
+                IntentType.RESCHEDULE_APPOINTMENT,
+                IntentType.CANCEL_APPOINTMENT
+            ]:
+                if "booked" in response_text.lower():
+                    response_text = (
+                        "I can help you book an appointment. "
+                        "Please share the doctor, date, and time you'd like."
+                    )
 
             # Update conversation state
             new_state = self._determine_conversation_state(intent_classification.intent, conversation_id)
@@ -246,13 +299,74 @@ class ChatService:
 
         # Start with existing booking context
         booking_context = self._get_existing_booking_context(context)
+        previous_doctor_name = booking_context.get("doctor_name")
+        previous_selected_email = booking_context.get("selected_doctor_email")
 
         # Extract booking details from entities and fallback parsing
         extracted = self._extract_booking_details_from_entities(intent.entities)
+        explicit_doctor_name = self._match_doctor_name_in_message(message, doctor_data)
+        if explicit_doctor_name:
+            extracted["doctor_name"] = explicit_doctor_name
+        elif extracted.get("doctor_name") and not self._mentions_doctor_pronoun(message):
+            extracted.pop("doctor_name", None)
+
         booking_context = self._merge_booking_context(booking_context, extracted)
 
         fallback = self._extract_booking_details_from_message(message, booking_context, context)
         booking_context = self._merge_booking_context(booking_context, fallback)
+
+        # If user refers to a doctor pronoun, prefer last referenced doctor
+        if self._mentions_doctor_pronoun(message) and context.get("last_doctor_name"):
+            if not booking_context.get("doctor_name") or not self._names_match(
+                booking_context.get("doctor_name"), context.get("last_doctor_name")
+            ):
+                booking_context["doctor_name"] = context.get("last_doctor_name")
+                if context.get("last_doctor_email"):
+                    booking_context["selected_doctor_email"] = context.get("last_doctor_email")
+                    booking_context["doctor_email"] = context.get("last_doctor_email")
+
+        # If user explicitly mentioned a doctor, lock selection to that doctor
+        if explicit_doctor_name:
+            resolved_doctor = self._find_doctor_by_name(explicit_doctor_name, doctor_data)
+            if resolved_doctor:
+                booking_context["doctor_name"] = resolved_doctor.get("name")
+                booking_context["selected_doctor_email"] = resolved_doctor.get("email")
+                booking_context["doctor_email"] = resolved_doctor.get("email")
+            else:
+                booking_context.pop("selected_doctor_email", None)
+                booking_context.pop("doctor_email", None)
+
+        # Clear stale email if doctor selection changed
+        if (
+            previous_doctor_name
+            and booking_context.get("doctor_name")
+            and not self._names_match(previous_doctor_name, booking_context.get("doctor_name"))
+        ):
+            booking_context.pop("doctor_email", None)
+            booking_context.pop("selected_doctor_email", None)
+
+        # Ensure selected email still matches chosen doctor name
+        if booking_context.get("selected_doctor_email") and booking_context.get("doctor_name"):
+            temp_context = {
+                "doctor_email": booking_context.get("selected_doctor_email"),
+                "doctor_name": booking_context.get("doctor_name")
+            }
+            if not self._doctor_email_matches_name(temp_context, doctor_data):
+                booking_context.pop("selected_doctor_email", None)
+                booking_context.pop("doctor_email", None)
+
+        # Derive doctor_email from selected_doctor_email if available
+        if booking_context.get("selected_doctor_email"):
+            booking_context["doctor_email"] = booking_context.get("selected_doctor_email")
+            if not booking_context.get("doctor_name"):
+                resolved_doctor = self._find_doctor_by_email(booking_context.get("selected_doctor_email"), doctor_data)
+                if resolved_doctor:
+                    booking_context["doctor_name"] = resolved_doctor.get("name")
+        elif booking_context.get("doctor_name"):
+            resolved_email = self._resolve_doctor_email(booking_context, doctor_data)
+            if resolved_email:
+                booking_context["selected_doctor_email"] = resolved_email
+                booking_context["doctor_email"] = resolved_email
 
         # Resolve doctor/specialization from prior context if missing
         if not booking_context.get("doctor_name") and context.get("last_doctor_name"):
@@ -263,6 +377,7 @@ class ChatService:
             and self._names_match(booking_context.get("doctor_name"), context.get("last_doctor_name"))
         ):
             booking_context["doctor_email"] = context.get("last_doctor_email")
+            booking_context["selected_doctor_email"] = context.get("last_doctor_email")
         if not booking_context.get("specialization"):
             for key in ("last_specialization", "availability_specialization"):
                 if context.get(key):
@@ -281,7 +396,31 @@ class ChatService:
         # Check what information we have and what's missing
         missing_info = self._get_missing_booking_info(booking_context)
 
+        if missing_info and missing_info[0] == "your phone number":
+            if not booking_context.get("patient_phone"):
+                normalized_phone = self._normalize_phone_input(message)
+                if normalized_phone:
+                    booking_context["patient_phone"] = normalized_phone
+                    self.conversation_manager.update_booking_context(
+                        conversation_id,
+                        {"patient_phone": normalized_phone}
+                    )
+                    missing_info = self._get_missing_booking_info(booking_context)
+                elif re.search(r"\d", message):
+                    self.conversation_manager.update_conversation(
+                        conversation_id=conversation_id,
+                        state=ConversationState.GATHERING_INFO
+                    )
+                    return (
+                        "That doesn't look like a valid phone number. "
+                        "Please enter a 10-digit number (optional +91)."
+                    )
+
         if missing_info:
+            self.conversation_manager.update_conversation(
+                conversation_id=conversation_id,
+                state=ConversationState.GATHERING_INFO
+            )
             return self._prompt_for_missing_info(missing_info, booking_context)
         else:
             # We have all info, check availability and prepare confirmation
@@ -364,8 +503,12 @@ class ChatService:
             elif entity.type == EntityType.DOCTOR_NAME:
                 doctor_name = entity.value
 
-        if not doctor_name:
-            doctor_name = self._match_doctor_name_in_message(message, doctor_data)
+        explicit_doctor_name = self._match_doctor_name_in_message(message, doctor_data)
+        if explicit_doctor_name:
+            doctor_name = explicit_doctor_name
+        elif doctor_name and not self._mentions_doctor_pronoun(message):
+            # Avoid LLM-inferred doctor when user didn't mention one
+            doctor_name = None
 
         if not doctor_name:
             resolved_doctor = self._resolve_doctor_from_context(message, context, doctor_data)
@@ -548,6 +691,17 @@ class ChatService:
                         "Would you like to check another date or a different doctor?"
                     )
 
+                # Persist availability context for booking follow-ups
+                self.conversation_manager.update_conversation(
+                    conversation_id=conversation_id,
+                    context={
+                        "availability_date": date_obj.isoformat(),
+                        "last_doctor_name": doctor_name,
+                        "last_doctor_email": doctor_email,
+                        "availability_specialization": specialization or context.get("last_specialization")
+                    }
+                )
+
                 slots_text = self._format_slots(slots)
                 return f"{self._format_doctor_name(doctor_name)} has availability on {date_obj.isoformat()}: {slots_text}"
 
@@ -571,6 +725,19 @@ class ChatService:
                         "Would you like to try another date?"
                     )
 
+                # Persist availability context for booking follow-ups
+                availability_context: Dict[str, Any] = {
+                    "availability_date": date_obj.isoformat(),
+                    "availability_specialization": normalized_specialization
+                }
+                if len(available_doctors) == 1:
+                    availability_context["last_doctor_name"] = available_doctors[0].get("name")
+                    availability_context["last_doctor_email"] = available_doctors[0].get("email")
+                self.conversation_manager.update_conversation(
+                    conversation_id=conversation_id,
+                    context=availability_context
+                )
+
                 summaries = []
                 for doctor in available_doctors[:3]:
                     slots_text = self._format_slots(doctor.get("available_slots", []))
@@ -582,7 +749,50 @@ class ChatService:
 
     async def _handle_my_appointments_intent(self, conversation_id: str) -> str:
         """Handle requests for user's appointments."""
-        return "I'd be happy to show you your appointments. Could you please provide your patient ID or contact information so I can look up your appointments?"
+        conversation = self.conversation_manager.get_conversation(conversation_id)
+        context = conversation.context if conversation else {}
+
+        phone = context.get("patient_phone")
+        if not phone:
+            # Try to extract phone number from recent message context
+            history = self.conversation_manager.get_conversation_history(conversation_id, limit=5)
+            for msg in reversed(history):
+                if msg.role.value == "user":
+                    phone = self._extract_phone_anywhere(msg.content)
+                    if phone:
+                        break
+
+        if not phone:
+            return "Please provide your phone number so I can look up your appointments."
+
+        self.conversation_manager.update_conversation(
+            conversation_id=conversation_id,
+            context={"patient_phone": phone}
+        )
+
+        try:
+            async with CalendarClient() as calendar_client:
+                patient = await calendar_client.get_patient_by_mobile(phone)
+                if not patient or patient.get("error"):
+                    return "I couldn't find a patient with that phone number. Please check the number and try again."
+
+                patient_id = patient.get("id")
+                if not patient_id:
+                    return "I couldn't find a patient record for that phone number."
+
+                appointments = await calendar_client.get_patient_appointments(patient_id)
+                if not appointments:
+                    return "I couldn't find any appointments for that phone number."
+
+                summaries = []
+                for appt in appointments[:5]:
+                    summaries.append(
+                        f"{appt.get('id')} on {appt.get('date')} at {appt.get('start_time')}"
+                    )
+
+                return "Here are your recent appointment IDs: " + "; ".join(summaries)
+        except Exception:
+            return "I couldn't fetch your appointments right now. Please try again."
 
     def _extract_booking_details_from_entities(self, entities: List[Any]) -> Dict[str, Any]:
         """Extract booking details from entities."""
@@ -601,7 +811,9 @@ class ChatService:
             elif entity.type == EntityType.PATIENT_NAME:
                 booking_details["patient_name"] = entity.value
             elif entity.type == EntityType.PHONE_NUMBER:
-                booking_details["patient_phone"] = entity.value
+                normalized = self._normalize_phone_input(entity.value)
+                if normalized:
+                    booking_details["patient_phone"] = normalized
             elif entity.type == EntityType.EMAIL:
                 booking_details["patient_email"] = entity.value
             elif entity.type == EntityType.SYMPTOMS:
@@ -699,6 +911,31 @@ class ChatService:
                 merged[key] = value
         return merged
 
+    def _build_idempotency_key(self, action: str, payload: Dict[str, Any], salt: Optional[str] = None) -> str:
+        enriched = dict(payload)
+        if salt:
+            enriched["_salt"] = salt
+        raw = json.dumps(enriched, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        return f"{action}:{digest}"
+
+    def _normalize_phone_input(self, value: Optional[str]) -> Optional[str]:
+        """Normalize phone input to 10 digits or +91XXXXXXXXXX."""
+        if not value:
+            return None
+        cleaned = re.sub(r"[^\d+]", "", value)
+        if cleaned.startswith("++"):
+            cleaned = cleaned[1:]
+        has_plus = cleaned.startswith("+")
+        digits = re.sub(r"\D", "", cleaned)
+        if has_plus:
+            if len(digits) == 12 and digits.startswith("91"):
+                return f"+{digits}"
+            return None
+        if len(digits) == 10:
+            return digits
+        return None
+
     def _extract_booking_details_from_message(
         self,
         message: str,
@@ -746,11 +983,11 @@ class ChatService:
         """Extract phone number from text when explicitly mentioned."""
         if not re.search(r"\b(phone|mobile|number|call me)\b", message, re.IGNORECASE):
             return None
-        digits = re.findall(r"\d+", message)
-        if not digits:
-            return None
-        candidate = "".join(digits)
-        return candidate if len(candidate) >= 3 else None
+        return self._normalize_phone_input(message)
+
+    def _extract_phone_anywhere(self, message: Optional[str]) -> Optional[str]:
+        """Extract phone number from text without requiring keywords."""
+        return self._normalize_phone_input(message)
 
     def _extract_name_from_text(self, message: str) -> Optional[str]:
         """Extract name from text patterns like 'my name is'."""
@@ -789,8 +1026,52 @@ class ChatService:
         doctor_data: List[Dict[str, Any]]
     ) -> str:
         """Check availability and prepare booking confirmation."""
+        # Ensure selected_doctor_email is the source of truth
+        if booking_context.get("selected_doctor_email"):
+            resolved_doctor = self._find_doctor_by_email(booking_context.get("selected_doctor_email"), doctor_data)
+            if resolved_doctor:
+                booking_context["doctor_email"] = resolved_doctor.get("email")
+                booking_context["doctor_name"] = resolved_doctor.get("name")
+            else:
+                return "I couldn't verify the selected doctor. Please choose a doctor again."
+        elif booking_context.get("doctor_email"):
+            resolved_doctor = self._find_doctor_by_email(booking_context.get("doctor_email"), doctor_data)
+            if resolved_doctor:
+                booking_context["selected_doctor_email"] = resolved_doctor.get("email")
+                booking_context["doctor_name"] = resolved_doctor.get("name")
+
+        if booking_context.get("doctor_name"):
+            candidates = self._find_doctor_candidates_by_name(booking_context.get("doctor_name"), doctor_data)
+            if booking_context.get("doctor_email") and not self._doctor_email_matches_name(booking_context, doctor_data):
+                if len(candidates) == 1:
+                    booking_context["selected_doctor_email"] = candidates[0].get("email")
+                    booking_context["doctor_email"] = candidates[0].get("email")
+                    booking_context["doctor_name"] = candidates[0].get("name")
+                else:
+                    self._store_doctor_candidates(conversation_id, candidates, booking_context.get("specialization"))
+                    candidate_names = [self._format_doctor_name(d.get("name")) for d in candidates[:3]]
+                    return (
+                        f"I found multiple doctors matching {booking_context.get('doctor_name')}: "
+                        f"{', '.join(candidate_names)}. Which one would you like to book with?"
+                    )
+            elif not booking_context.get("doctor_email") and len(candidates) == 1:
+                booking_context["selected_doctor_email"] = candidates[0].get("email")
+                booking_context["doctor_email"] = candidates[0].get("email")
+                booking_context["doctor_name"] = candidates[0].get("name")
+
+        # Persist selected doctor if resolved
+        if booking_context.get("selected_doctor_email"):
+            self.conversation_manager.update_booking_context(
+                conversation_id,
+                {
+                    "selected_doctor_email": booking_context.get("selected_doctor_email"),
+                    "doctor_email": booking_context.get("doctor_email"),
+                    "doctor_name": booking_context.get("doctor_name")
+                }
+            )
+
         # Resolve doctor if needed
-        doctor_email = booking_context.get("doctor_email")
+        doctor_email = booking_context.get("selected_doctor_email") or booking_context.get("doctor_email")
         if not doctor_email:
             if booking_context.get("doctor_name"):
                 resolved_doctor = self._find_doctor_by_name(booking_context.get("doctor_name"), doctor_data)
@@ -863,13 +1144,24 @@ class ChatService:
         """Fallback intent detection using simple keyword rules."""
         text = message.strip().lower()
 
+        if intent_classification.intent == IntentType.RESCHEDULE_APPOINTMENT:
+            has_appointment_id = self._extract_appointment_id(message)
+            wants_booking = re.search(r"\b(book|schedule)\b", text)
+            wants_reschedule = re.search(r"\b(reschedule|change|move)\b", text)
+            if not has_appointment_id and wants_booking and not wants_reschedule:
+                return IntentClassification(
+                    intent=IntentType.BOOK_APPOINTMENT,
+                    confidence=max(intent_classification.confidence, 0.7),
+                    entities=intent_classification.entities
+                )
+
         rules = [
             (r"\b(book|schedule|appointment)\b", IntentType.BOOK_APPOINTMENT),
             (r"\b(reschedule|change|move)\b", IntentType.RESCHEDULE_APPOINTMENT),
             (r"\b(cancel|delete)\b", IntentType.CANCEL_APPOINTMENT),
             (r"\b(availability|available|slots)\b", IntentType.CHECK_AVAILABILITY),
             (r"\b(doctor|specialist|specialization|information)\b", IntentType.GET_DOCTOR_INFO),
-            (r"\b(my appointments?|appointments list)\b", IntentType.GET_MY_APPOINTMENTS),
+            (r"\b(my appointments?|appointments list|appointment id)\b", IntentType.GET_MY_APPOINTMENTS),
         ]
 
         if intent_classification.intent != IntentType.UNKNOWN and intent_classification.confidence >= 0.5:
@@ -886,14 +1178,16 @@ class ChatService:
         return intent_classification
 
     async def _get_doctor_data(self) -> List[Dict[str, Any]]:
-        """Fetch doctor data with simple in-memory caching."""
-        now = time_module.time()
-        if (
-            now - self._doctor_cache["timestamp"] < self._doctor_cache_ttl_seconds
-            and self._doctor_cache["data"]
-        ):
-            return self._doctor_cache["data"]
-
+        """Fetch doctor data with Redis caching."""
+        if self._redis:
+            cached = self._redis.get(self._doctor_cache_key)
+            if cached:
+                try:
+                    doctors = json.loads(cached)
+                    if isinstance(doctors, list):
+                        return doctors
+                except Exception:
+                    pass
         try:
             async with CalendarClient() as calendar_client:
                 doctor_response = await calendar_client.get_doctor_data()
@@ -912,8 +1206,15 @@ class ChatService:
             else:
                 doctors = [d for d in doctors if isinstance(d, dict)]
 
-            if doctors:
-                self._doctor_cache = {"timestamp": now, "data": doctors}
+            if doctors and self._redis:
+                try:
+                    self._redis.setex(
+                        self._doctor_cache_key,
+                        self._doctor_cache_ttl_seconds,
+                        json.dumps(doctors)
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to cache doctor data in Redis: {e}")
             return doctors
         except Exception as e:
             logger.error(f"Failed to fetch doctor data: {e}")
@@ -1051,6 +1352,59 @@ class ChatService:
             ):
                 return doctor
         return None
+
+    def _find_doctor_by_email(
+        self,
+        doctor_email: Optional[str],
+        doctor_data: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Locate a doctor dict by email."""
+        if not doctor_email:
+            return None
+        for doctor in doctor_data:
+            if doctor.get("email") == doctor_email:
+                return doctor
+        return None
+
+    def _find_doctor_candidates_by_name(
+        self,
+        doctor_name: Optional[str],
+        doctor_data: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Find possible doctor matches by name."""
+        if not doctor_name:
+            return []
+        normalized_target = self._normalize_doctor_name(doctor_name)
+        target_tokens = self._name_tokens(doctor_name)
+        candidates = []
+        for doctor in doctor_data:
+            name = doctor.get("name")
+            if not name:
+                continue
+            normalized_candidate = self._normalize_doctor_name(name)
+            candidate_tokens = self._name_tokens(name)
+            if (
+                normalized_target in normalized_candidate
+                or normalized_candidate in normalized_target
+                or (target_tokens and candidate_tokens and target_tokens.intersection(candidate_tokens))
+            ):
+                candidates.append(doctor)
+        return candidates
+
+    def _doctor_email_matches_name(
+        self,
+        booking_context: Dict[str, Any],
+        doctor_data: List[Dict[str, Any]]
+    ) -> bool:
+        """Check whether doctor_email and doctor_name refer to the same doctor."""
+        doctor_email = booking_context.get("doctor_email")
+        doctor_name = booking_context.get("doctor_name")
+        if not doctor_email or not doctor_name:
+            return False
+        doctor = self._find_doctor_by_email(doctor_email, doctor_data)
+        if not doctor:
+            return False
+        return self._names_match(doctor_name, doctor.get("name"))
 
     def _resolve_doctor_from_context(
         self,
@@ -1261,6 +1615,7 @@ class ChatService:
             async with CalendarClient() as calendar_client:
                 booking_payload = {
                     "doctor_email": doctor_email,
+                    "doctor_name": booking_context.get("doctor_name"),
                     "patient_mobile_number": booking_context.get("patient_phone"),
                     "patient_name": booking_context.get("patient_name"),
                     "patient_email": booking_context.get("patient_email"),
@@ -1268,17 +1623,52 @@ class ChatService:
                     "start_time": booking_time.isoformat(),
                     "symptoms": booking_context.get("symptoms")
                 }
-                response = await calendar_client.book_appointment(booking_payload)
+                idempotency_key = self._build_idempotency_key("book", booking_payload, salt=conversation_id)
+                response = await calendar_client.book_appointment(booking_payload, idempotency_key=idempotency_key)
+
+            if isinstance(response, dict) and response.get("error"):
+                logger.error(f"Booking failed for {doctor_email}: {response.get('error')}")
+                self.conversation_manager.update_conversation(
+                    conversation_id=conversation_id,
+                    state=ConversationState.GATHERING_INFO,
+                    context={"pending_action": None}
+                )
+                return "I couldn't book the appointment due to an error. Please try another time or check the details."
 
             self.conversation_manager.update_conversation(
                 conversation_id=conversation_id,
                 state=ConversationState.COMPLETED,
-                context={"pending_action": None}
+                context={
+                    "pending_action": None,
+                    # Clear booking-specific context to avoid stale doctor mismatches
+                    "appointment_id": None,
+                    "selected_doctor_email": None,
+                    "doctor_email": None,
+                    "doctor_name": None,
+                    "specialization": None,
+                    "date": None,
+                    "time": None,
+                    "patient_name": None,
+                    "patient_phone": None,
+                    "patient_email": None,
+                    "symptoms": None,
+                    "appointment_type": None,
+                    "reschedule_date": None,
+                    "reschedule_time": None
+                }
             )
             appointment_id = response.get("id") if isinstance(response, dict) else None
+            calendar_event_id = response.get("google_calendar_event_id") if isinstance(response, dict) else None
+            if not appointment_id:
+                logger.error("Booking response missing appointment id")
+                return "I couldn't confirm the booking. Please try again."
+            calendar_note = ""
+            if appointment_id and not calendar_event_id:
+                calendar_note = " Calendar sync is pending; it may take a moment to appear."
             return (
                 f"Appointment booked successfully! "
                 f"{'Appointment ID: ' + appointment_id if appointment_id else ''}"
+                f"{calendar_note}"
             ).strip()
         except Exception as e:
             logger.error(f"Booking failed: {e}")
@@ -1323,7 +1713,20 @@ class ChatService:
                     "new_start_time": new_time.isoformat(),
                     "new_end_time": new_end.isoformat()
                 }
-                response = await calendar_client.reschedule_appointment(appointment_id, reschedule_payload)
+                idempotency_key = self._build_idempotency_key(
+                    "reschedule",
+                    {"appointment_id": appointment_id, **reschedule_payload},
+                    salt=conversation_id
+                )
+                response = await calendar_client.reschedule_appointment(
+                    appointment_id,
+                    reschedule_payload,
+                    idempotency_key=idempotency_key
+                )
+
+            if isinstance(response, dict) and response.get("error"):
+                logger.error(f"Reschedule failed for {appointment_id}: {response.get('error')}")
+                return "I couldn't reschedule the appointment because that time slot is not available. Please try a different time."
 
             self.conversation_manager.update_conversation(
                 conversation_id=conversation_id,
@@ -1347,7 +1750,16 @@ class ChatService:
 
         try:
             async with CalendarClient() as calendar_client:
-                response = await calendar_client.cancel_appointment(appointment_id)
+                idempotency_key = self._build_idempotency_key(
+                    "cancel",
+                    {"appointment_id": appointment_id},
+                    salt=conversation_id
+                )
+                response = await calendar_client.cancel_appointment(appointment_id, idempotency_key=idempotency_key)
+
+            if isinstance(response, dict) and response.get("error"):
+                logger.error(f"Cancel failed for {appointment_id}: {response.get('error')}")
+                return "I couldn't cancel the appointment. Please check the appointment ID and try again."
 
             self.conversation_manager.update_conversation(
                 conversation_id=conversation_id,

@@ -5,7 +5,7 @@ Script to export doctor data to JSON format for chatbot consumption.
 import os
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 # Add the app directory to Python path
@@ -61,7 +61,7 @@ def export_doctor_data(output_file: str = "doctor_data.json", clinic_id: str = N
         # Create export data structure
         export_data = {
             "doctors": doctors_data,
-            "export_timestamp": datetime.utcnow().isoformat(),
+            "export_timestamp": datetime.now(timezone.utc).isoformat(),
             "total_doctors": len(doctors_data),
             "metadata": {
                 "clinic_id": clinic_id,

@@ -7,17 +7,19 @@ import asyncio
 import httpx
 import json
 import time
+import os
 from datetime import datetime, date, time as dt_time
 
 # Configuration
 CALENDAR_SERVICE_URL = "http://localhost:8000"
 CHATBOT_SERVICE_URL = "http://localhost:8001"
+CALENDAR_API_KEY = os.getenv("SERVICE_API_KEY", "dev-api-key")
 
 async def test_calendar_service():
     """Test calendar service endpoints."""
     print("Testing Calendar Service...")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers={"X-API-Key": CALENDAR_API_KEY}) as client:
         try:
             # Test health check
             response = await client.get(f"{CALENDAR_SERVICE_URL}/health")
@@ -51,7 +53,7 @@ async def test_chatbot_service():
     """Test chatbot service endpoints."""
     print("\nTesting Chatbot Service...")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers={"X-API-Key": CALENDAR_API_KEY}) as client:
         try:
             # Test health check
             response = await client.get(f"{CHATBOT_SERVICE_URL}/api/v1/health/")

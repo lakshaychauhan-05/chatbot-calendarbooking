@@ -6,10 +6,12 @@ Never reads availability from Google Calendar.
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timezone
 from typing import Optional
 from app.config import settings
 import logging
+import time as time_module
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,8 @@ class GoogleCalendarService:
         appointment_date: date,
         start_time: time,
         end_time: time,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        timezone_name: Optional[str] = None
     ) -> Optional[str]:
         """
         Create a Google Calendar event for an appointment.
@@ -97,10 +100,12 @@ class GoogleCalendarService:
         try:
             service = self._get_service(doctor_email)
             
-            # Combine date and time (assume UTC timezone)
-            from datetime import timezone
-            start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=timezone.utc)
-            end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=timezone.utc)
+            try:
+                tz = ZoneInfo(timezone_name) if timezone_name else timezone.utc
+            except Exception:
+                tz = timezone.utc
+            start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
+            end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
             
             # Format for Google Calendar (RFC3339)
             start_rfc3339 = start_datetime.isoformat()
@@ -111,18 +116,17 @@ class GoogleCalendarService:
                 'description': description or f'Appointment with {patient_name}',
                 'start': {
                     'dateTime': start_rfc3339,
-                    'timeZone': 'UTC',
+                'timeZone': str(tz),
                 },
                 'end': {
                     'dateTime': end_rfc3339,
-                    'timeZone': 'UTC',
+                'timeZone': str(tz),
                 },
             }
             
-            event = service.events().insert(
-                calendarId=doctor_email,
-                body=event
-            ).execute()
+            event = self._execute_with_retry(
+                lambda: service.events().insert(calendarId=doctor_email, body=event).execute()
+            )
             
             logger.info(f"Created Google Calendar event {event.get('id')} for doctor {doctor_email}")
             return event.get('id')
@@ -143,7 +147,8 @@ class GoogleCalendarService:
         appointment_date: date,
         start_time: time,
         end_time: time,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        timezone_name: Optional[str] = None
     ) -> bool:
         """
         Update a Google Calendar event.
@@ -170,10 +175,12 @@ class GoogleCalendarService:
                 eventId=event_id
             ).execute()
             
-            # Update event details (assume UTC timezone)
-            from datetime import timezone
-            start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=timezone.utc)
-            end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=timezone.utc)
+            try:
+                tz = ZoneInfo(timezone_name) if timezone_name else timezone.utc
+            except Exception:
+                tz = timezone.utc
+            start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
+            end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
             
             start_rfc3339 = start_datetime.isoformat()
             end_rfc3339 = end_datetime.isoformat()
@@ -182,12 +189,12 @@ class GoogleCalendarService:
             event['description'] = description or f'Appointment with {patient_name}'
             event['start']['dateTime'] = start_rfc3339
             event['end']['dateTime'] = end_rfc3339
+            event['start']['timeZone'] = str(tz)
+            event['end']['timeZone'] = str(tz)
             
-            updated_event = service.events().update(
-                calendarId=doctor_email,
-                eventId=event_id,
-                body=event
-            ).execute()
+            updated_event = self._execute_with_retry(
+                lambda: service.events().update(calendarId=doctor_email, eventId=event_id, body=event).execute()
+            )
             
             logger.info(f"Updated Google Calendar event {event_id} for doctor {doctor_email}")
             return True
@@ -214,10 +221,9 @@ class GoogleCalendarService:
         try:
             service = self._get_service(doctor_email)
             
-            service.events().delete(
-                calendarId=doctor_email,
-                eventId=event_id
-            ).execute()
+            self._execute_with_retry(
+                lambda: service.events().delete(calendarId=doctor_email, eventId=event_id).execute()
+            )
             
             logger.info(f"Deleted Google Calendar event {event_id} for doctor {doctor_email}")
             return True
@@ -232,3 +238,16 @@ class GoogleCalendarService:
         except Exception as e:
             logger.error(f"Unexpected error deleting Google Calendar event: {str(e)}")
             return False
+
+    def _execute_with_retry(self, func, max_attempts: int = 3, base_delay_seconds: int = 1):
+        """Retry helper for transient Google Calendar API failures."""
+        for attempt in range(max_attempts):
+            try:
+                return func()
+            except HttpError as e:
+                status = getattr(e.resp, "status", None)
+                if status in {429, 500, 502, 503, 504} and attempt < max_attempts - 1:
+                    delay = base_delay_seconds * (2 ** attempt)
+                    time_module.sleep(delay)
+                    continue
+                raise

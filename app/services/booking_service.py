@@ -3,20 +3,23 @@ Booking Service - handles appointment booking, rescheduling, and cancellation.
 Uses database transactions with row-level locking to prevent double booking.
 Google Calendar is updated ONLY after DB transaction succeeds.
 """
-from datetime import date, time
+from datetime import date, time, datetime, timedelta
+import re
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from uuid import UUID
 import logging
 
+from app.config import settings
 from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.patient_history import PatientHistory
 from app.models.appointment import Appointment, AppointmentStatus, AppointmentSource
 from app.schemas.appointment import AppointmentCreate, AppointmentReschedule
 from app.services.availability_service import AvailabilityService
-from app.services.google_calendar_service import GoogleCalendarService
+from app.services.calendar_sync_queue import calendar_sync_queue
 from app.services.rag_sync_service import RAGSyncService
+from app.utils.datetime_utils import to_utc
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,6 @@ class BookingService:
     
     def __init__(self):
         self.availability_service = AvailabilityService()
-        self.google_calendar_service = GoogleCalendarService()
         self.rag_sync_service = RAGSyncService()
     
     def book_appointment(
@@ -62,11 +64,31 @@ class BookingService:
         if not doctor.is_active:
             raise ValueError(f"Doctor with email '{booking_data.doctor_email}' is not active")
 
+        if booking_data.doctor_name:
+            def normalize(name: str) -> str:
+                name = name.strip().lower()
+                name = re.sub(r"^dr\.?\s+", "", name)
+                name = re.sub(r"^doctor\s+", "", name)
+                name = re.sub(r"\s+", " ", name)
+                return name
+
+            requested_name = normalize(booking_data.doctor_name)
+            actual_name = normalize(doctor.name)
+            if requested_name and actual_name and requested_name not in actual_name and actual_name not in requested_name:
+                raise ValueError("Doctor name does not match the selected doctor")
+
+        # Prevent booking in the past
+        if booking_data.date < date.today():
+            raise ValueError("Appointment date cannot be in the past")
+
         # Calculate slot end time based on doctor's slot duration
-        from datetime import datetime, timedelta
         start_datetime = datetime.combine(booking_data.date, booking_data.start_time)
         end_datetime = start_datetime + timedelta(minutes=doctor.slot_duration_minutes)
         slot_end_time = end_datetime.time()
+
+        appointment_tz = doctor.timezone or settings.DEFAULT_TIMEZONE
+        start_at_utc = to_utc(booking_data.date, booking_data.start_time, appointment_tz)
+        end_at_utc = to_utc(booking_data.date, slot_end_time, appointment_tz)
 
         # Validate slot availability
         if not self.availability_service.is_slot_available(
@@ -127,7 +149,7 @@ class BookingService:
             existing_appointment = db.query(Appointment).filter(
                 Appointment.doctor_email == doctor.email,  # Changed to use doctor.email
                 Appointment.date == booking_data.date,
-                Appointment.status == AppointmentStatus.BOOKED,
+                Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED]),
                 Appointment.start_time < slot_end_time,
                 Appointment.end_time > booking_data.start_time
             ).with_for_update().first()
@@ -142,32 +164,20 @@ class BookingService:
                 date=booking_data.date,
                 start_time=booking_data.start_time,
                 end_time=slot_end_time,
+                timezone=appointment_tz,
+                start_at_utc=start_at_utc,
+                end_at_utc=end_at_utc,
                 status=AppointmentStatus.BOOKED,
-                source=booking_data.source
+                source=booking_data.source,
+                calendar_sync_status="PENDING"
             )
             
             db.add(appointment)
             db.commit()
             db.refresh(appointment)
             
-            # After DB commit, create Google Calendar event
-            try:
-                event_id = self.google_calendar_service.create_event(
-                    doctor_email=doctor.email,
-                    patient_name=patient.name,
-                    appointment_date=appointment.date,
-                    start_time=appointment.start_time,
-                    end_time=appointment.end_time,
-                    description=f"Appointment with {patient.name}"
-                )
-                
-                if event_id:
-                    appointment.google_calendar_event_id = event_id
-                    db.commit()
-                    db.refresh(appointment)
-            except Exception as e:
-                # Log but don't fail - Google Calendar is just a mirror
-                logger.error(f"Failed to create Google Calendar event: {str(e)}")
+            # Queue calendar sync instead of blocking request
+            calendar_sync_queue.enqueue_create(str(appointment.id))
             
             logger.info(f"Successfully booked appointment {appointment.id}")
             return appointment
@@ -212,20 +222,32 @@ class BookingService:
         # Get existing appointment
         appointment = db.query(Appointment).filter(
             Appointment.id == appointment_id,
-            Appointment.status == AppointmentStatus.BOOKED
+            Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED])
         ).first()
         
         if not appointment:
             raise ValueError(f"Appointment {appointment_id} not found or already cancelled")
         
-        # Validate new slot availability
+        # Validate new slot availability with lock to avoid race conditions
         if not self.availability_service.is_slot_available(
             db=db,
-            doctor_email=appointment.doctor_email,  # Changed to use appointment.doctor_email
+            doctor_email=appointment.doctor_email,
             slot_date=reschedule_data.new_date,
             slot_start_time=reschedule_data.new_start_time,
-            slot_end_time=reschedule_data.new_end_time
+            slot_end_time=reschedule_data.new_end_time,
+            exclude_appointment_id=appointment.id
         ):
+            raise ValueError("New slot is not available")
+
+        overlapping = db.query(Appointment).filter(
+            Appointment.doctor_email == appointment.doctor_email,
+            Appointment.date == reschedule_data.new_date,
+            Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED]),
+            Appointment.start_time < reschedule_data.new_end_time,
+            Appointment.end_time > reschedule_data.new_start_time,
+            Appointment.id != appointment.id
+        ).with_for_update().first()
+        if overlapping:
             raise ValueError("New slot is not available")
 
         # Get doctor
@@ -239,6 +261,9 @@ class BookingService:
             raise ValueError(f"Patient {appointment.patient_id} not found")
         
         old_event_id = appointment.google_calendar_event_id
+        appointment_tz = doctor.timezone or settings.DEFAULT_TIMEZONE
+        start_at_utc = to_utc(reschedule_data.new_date, reschedule_data.new_start_time, appointment_tz)
+        end_at_utc = to_utc(reschedule_data.new_date, reschedule_data.new_end_time, appointment_tz)
         
         try:
             # Update appointment in DB transaction
@@ -246,23 +271,19 @@ class BookingService:
             appointment.date = reschedule_data.new_date
             appointment.start_time = reschedule_data.new_start_time
             appointment.end_time = reschedule_data.new_end_time
+            appointment.timezone = appointment_tz
+            appointment.start_at_utc = start_at_utc
+            appointment.end_at_utc = end_at_utc
+            appointment.calendar_sync_status = "PENDING"
             
             db.commit()
             db.refresh(appointment)
             
-            # Update Google Calendar event
+            # Queue calendar sync instead of blocking request
             if old_event_id:
-                try:
-                    self.google_calendar_service.update_event(
-                        doctor_email=doctor.email,
-                        event_id=old_event_id,
-                        patient_name=patient.name,
-                        appointment_date=reschedule_data.new_date,
-                        start_time=reschedule_data.new_start_time,
-                        end_time=reschedule_data.new_end_time
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to update Google Calendar event: {str(e)}")
+                calendar_sync_queue.enqueue_update(str(appointment.id))
+            else:
+                calendar_sync_queue.enqueue_create(str(appointment.id))
             
             logger.info(f"Successfully rescheduled appointment {appointment_id}")
             return appointment
@@ -296,12 +317,11 @@ class BookingService:
         """
         # Get appointment
         appointment = db.query(Appointment).filter(
-            Appointment.id == appointment_id,
-            Appointment.status == AppointmentStatus.BOOKED
+            Appointment.id == appointment_id
         ).first()
         
         if not appointment:
-            raise ValueError(f"Appointment {appointment_id} not found or already cancelled")
+            raise ValueError(f"Appointment {appointment_id} not found")
         
         # Get doctor
         doctor = db.query(Doctor).filter(Doctor.email == appointment.doctor_email).first()  # Changed to email
@@ -311,21 +331,16 @@ class BookingService:
         event_id = appointment.google_calendar_event_id
         
         try:
-            # Mark as cancelled in DB
-            appointment.status = AppointmentStatus.CANCELLED
+            # Mark as cancelled in DB (idempotent if already cancelled)
+            if appointment.status != AppointmentStatus.CANCELLED:
+                appointment.status = AppointmentStatus.CANCELLED
+                appointment.calendar_sync_status = "PENDING"
+                db.commit()
+                db.refresh(appointment)
             
-            db.commit()
-            db.refresh(appointment)
-            
-            # Delete Google Calendar event
+            # Queue calendar sync instead of blocking request
             if event_id:
-                try:
-                    self.google_calendar_service.delete_event(
-                        doctor_email=doctor.email,
-                        event_id=event_id
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to delete Google Calendar event: {str(e)}")
+                calendar_sync_queue.enqueue_delete(str(appointment.id))
             
             logger.info(f"Successfully cancelled appointment {appointment_id}")
             return appointment

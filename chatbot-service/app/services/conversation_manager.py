@@ -2,10 +2,12 @@
 Conversation Manager for handling chat state and context.
 """
 import uuid
+import json
 import logging
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
-from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
+import redis
 
 from app.core.config import settings
 from app.models.chat import (
@@ -23,9 +25,81 @@ class ConversationManager:
     """Manages conversation state and context."""
 
     def __init__(self):
-        # In-memory storage for conversations (use Redis in production)
-        self._conversations: Dict[str, Conversation] = {}
-        self._user_conversations: Dict[str, List[str]] = defaultdict(list)
+        self._redis = None
+        self._memory_store: Dict[str, Conversation] = {}
+        self._user_conversations: Dict[str, List[str]] = {}
+
+        if settings.REDIS_URL:
+            try:
+                self._redis = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+                self._redis.ping()
+            except Exception as e:
+                logger.warning(f"Redis unavailable, using in-memory store: {e}")
+                self._redis = None
+
+        self._max_history_terms = 20
+        self._max_user_conversations = 20
+
+    def _conversation_key(self, conversation_id: str) -> str:
+        return f"conversation:{conversation_id}"
+
+    def _user_conversations_key(self, user_id: str) -> str:
+        return f"user_conversations:{user_id}"
+
+    def _ttl_seconds(self) -> int:
+        return int(settings.CONVERSATION_TIMEOUT_MINUTES * 60)
+
+    def _serialize_conversation(self, conversation: Conversation) -> str:
+        def serialize_message(msg: ChatMessage) -> Dict[str, Any]:
+            return {
+                "role": msg.role.value,
+                "content": msg.content,
+                "timestamp": msg.timestamp.isoformat(),
+                "metadata": msg.metadata
+            }
+
+        payload = {
+            "id": conversation.id,
+            "user_id": conversation.user_id,
+            "messages": [serialize_message(m) for m in conversation.messages],
+            "state": conversation.state.value,
+            "context": conversation.context,
+            "created_at": conversation.created_at.isoformat(),
+            "updated_at": conversation.updated_at.isoformat(),
+            "expires_at": conversation.expires_at.isoformat() if conversation.expires_at else None
+        }
+        return json.dumps(payload)
+
+    def _deserialize_conversation(self, data: str) -> Conversation:
+        payload = json.loads(data)
+
+        def parse_dt(value: Optional[str]) -> Optional[datetime]:
+            if not value:
+                return None
+            return datetime.fromisoformat(value)
+
+        messages = []
+        for msg in payload.get("messages", []):
+            try:
+                messages.append(ChatMessage(
+                    role=MessageRole(msg.get("role")),
+                    content=msg.get("content"),
+                    timestamp=parse_dt(msg.get("timestamp")) or datetime.now(timezone.utc),
+                    metadata=msg.get("metadata")
+                ))
+            except Exception:
+                continue
+
+        return Conversation(
+            id=payload.get("id"),
+            user_id=payload.get("user_id"),
+            messages=messages,
+            state=ConversationState(payload.get("state", ConversationState.INITIAL.value)),
+            context=payload.get("context") or {},
+            created_at=parse_dt(payload.get("created_at")) or datetime.now(timezone.utc),
+            updated_at=parse_dt(payload.get("updated_at")) or datetime.now(timezone.utc),
+            expires_at=parse_dt(payload.get("expires_at"))
+        )
 
     def create_conversation(self, user_id: Optional[str] = None) -> Conversation:
         """Create a new conversation."""
@@ -36,29 +110,47 @@ class ConversationManager:
             user_id=user_id,
             state=ConversationState.INITIAL,
             context={},
-            expires_at=datetime.utcnow() + timedelta(minutes=settings.CONVERSATION_TIMEOUT_MINUTES)
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.CONVERSATION_TIMEOUT_MINUTES)
         )
 
-        self._conversations[conversation_id] = conversation
-
-        if user_id:
-            self._user_conversations[user_id].append(conversation_id)
-            # Keep only recent conversations per user
-            if len(self._user_conversations[user_id]) > 10:
-                old_conversation_id = self._user_conversations[user_id].pop(0)
-                self._conversations.pop(old_conversation_id, None)
+        if self._redis:
+            self._redis.setex(
+                self._conversation_key(conversation_id),
+                self._ttl_seconds(),
+                self._serialize_conversation(conversation)
+            )
+            if user_id:
+                key = self._user_conversations_key(user_id)
+                self._redis.rpush(key, conversation_id)
+                self._redis.ltrim(key, -self._max_user_conversations, -1)
+                self._redis.expire(key, self._ttl_seconds())
+        else:
+            self._memory_store[conversation_id] = conversation
+            if user_id:
+                existing = self._user_conversations.get(user_id, [])
+                existing.append(conversation_id)
+                self._user_conversations[user_id] = existing[-self._max_user_conversations:]
 
         logger.info(f"Created conversation {conversation_id} for user {user_id}")
         return conversation
 
     def get_conversation(self, conversation_id: str) -> Optional[Conversation]:
         """Get a conversation by ID."""
-        conversation = self._conversations.get(conversation_id)
+        conversation = None
+        if self._redis:
+            data = self._redis.get(self._conversation_key(conversation_id))
+            if data:
+                conversation = self._deserialize_conversation(data)
+        else:
+            conversation = self._memory_store.get(conversation_id)
 
         if conversation and conversation.expires_at:
-            if datetime.utcnow() > conversation.expires_at:
+            if datetime.now(timezone.utc) > conversation.expires_at:
                 # Conversation expired
-                self._conversations.pop(conversation_id, None)
+                if self._redis:
+                    self._redis.delete(self._conversation_key(conversation_id))
+                else:
+                    self._memory_store.pop(conversation_id, None)
                 return None
 
         return conversation
@@ -88,19 +180,27 @@ class ConversationManager:
             if len(conversation.messages) > max_messages:
                 conversation.messages = conversation.messages[-max_messages:]
 
-        conversation.updated_at = datetime.utcnow()
+        conversation.updated_at = datetime.now(timezone.utc)
 
         # Extend expiration
-        conversation.expires_at = datetime.utcnow() + timedelta(minutes=settings.CONVERSATION_TIMEOUT_MINUTES)
+        conversation.expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.CONVERSATION_TIMEOUT_MINUTES)
 
+        if self._redis:
+            self._redis.setex(
+                self._conversation_key(conversation_id),
+                self._ttl_seconds(),
+                self._serialize_conversation(conversation)
+            )
+        else:
+            self._memory_store[conversation_id] = conversation
         return conversation
 
     def _max_history_messages(self) -> int:
         """Compute max messages to keep based on turn settings."""
         turns = getattr(settings, "MAX_CONVERSATION_TURNS", None)
         if isinstance(turns, int) and turns > 0:
-            return turns * 2
-        return settings.MAX_CONVERSATION_HISTORY
+            return min(turns * 2, self._max_history_terms)
+        return min(settings.MAX_CONVERSATION_HISTORY, self._max_history_terms)
 
     def add_message(
         self,
@@ -170,7 +270,11 @@ class ConversationManager:
 
     def get_user_conversations(self, user_id: str) -> List[Conversation]:
         """Get all active conversations for a user."""
-        conversation_ids = self._user_conversations.get(user_id, [])
+        if self._redis:
+            key = self._user_conversations_key(user_id)
+            conversation_ids = self._redis.lrange(key, 0, -1) or []
+        else:
+            conversation_ids = self._user_conversations.get(user_id, [])
         conversations = []
 
         for conv_id in conversation_ids:
@@ -182,20 +286,13 @@ class ConversationManager:
 
     def cleanup_expired_conversations(self) -> int:
         """Clean up expired conversations. Returns number of cleaned conversations."""
-        now = datetime.utcnow()
-        expired_ids = []
-
-        for conv_id, conversation in self._conversations.items():
+        if self._redis:
+            # Redis handles expiration automatically
+            return 0
+        removed = 0
+        now = datetime.now(timezone.utc)
+        for conv_id, conversation in list(self._memory_store.items()):
             if conversation.expires_at and now > conversation.expires_at:
-                expired_ids.append(conv_id)
-
-        for conv_id in expired_ids:
-            conversation = self._conversations.pop(conv_id, None)
-            if conversation and conversation.user_id:
-                self._user_conversations[conversation.user_id] = [
-                    cid for cid in self._user_conversations[conversation.user_id]
-                    if cid != conv_id
-                ]
-
-        logger.info(f"Cleaned up {len(expired_ids)} expired conversations")
-        return len(expired_ids)
+                self._memory_store.pop(conv_id, None)
+                removed += 1
+        return removed

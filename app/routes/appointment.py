@@ -1,12 +1,12 @@
 """
 Appointment management API routes.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
-from datetime import date, datetime
-import json
+from datetime import date, datetime, timezone, timedelta
 
 from app.database import get_db
 from app.security import verify_api_key
@@ -19,7 +19,9 @@ from app.schemas.appointment import (
     AvailabilityResponse
 )
 from app.services.availability_service import AvailabilityService
+from app.config import settings
 from app.services.booking_service import BookingService
+from app.services.idempotency_service import IdempotencyService
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 availability_service = AvailabilityService()
 booking_service = BookingService()
+idempotency_service = IdempotencyService()
+_doctor_export_cache = {"timestamp": None, "clinic_id": None, "data": None}
 
 
 @router.get("/availability/{doctor_email}", response_model=AvailabilityResponse)
@@ -41,6 +45,14 @@ async def get_availability(
     Database is the single source of truth for availability.
     """
     try:
+        today = datetime.now(timezone.utc).date()
+        max_date = today + timedelta(days=settings.MAX_AVAILABILITY_DAYS)
+        if date < today or date > max_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"date must be between today and {max_date.isoformat()}"
+            )
+
         availability = availability_service.get_available_slots(
             db=db,
             doctor_email=doctor_email,
@@ -64,7 +76,8 @@ async def get_availability(
 async def book_appointment(
     appointment_data: AppointmentCreate,
     db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
+    api_key: str = Depends(verify_api_key),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")
 ):
     """
     Book a new appointment.
@@ -76,18 +89,62 @@ async def book_appointment(
     4. Use DB transaction + row-level locking to prevent double booking
     5. After DB commit, create Google Calendar event
     """
+    record = None
     try:
+        if idempotency_key:
+            record, existing = idempotency_service.begin(
+                db=db,
+                key=idempotency_key,
+                endpoint="POST:/api/v1/appointments",
+                payload=appointment_data.model_dump()
+            )
+            if existing:
+                existing_result = idempotency_service.validate_existing(existing, appointment_data.model_dump())
+                if existing_result["status"] == "conflict":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Idempotency key reuse with different payload"
+                    )
+                if existing_result["status"] == "completed":
+                    return JSONResponse(
+                        status_code=existing_result["response_status"],
+                        content=existing_result["response"]
+                    )
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={"status": "processing"}
+                )
+
         appointment = booking_service.book_appointment(
             db=db,
             booking_data=appointment_data
         )
-        return appointment
+        response_payload = AppointmentResponse.model_validate(appointment).model_dump()
+        if idempotency_key:
+            idempotency_service.complete(db, record, response_payload, status.HTTP_201_CREATED)
+        return response_payload
     except ValueError as e:
+        db.rollback()
+        if record:
+            idempotency_service.complete(
+                db,
+                record,
+                {"detail": str(e)},
+                status.HTTP_400_BAD_REQUEST
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        db.rollback()
+        if record:
+            idempotency_service.complete(
+                db,
+                record,
+                {"detail": f"Failed to book appointment: {str(e)}"},
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         logger.error(f"Error booking appointment: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -99,8 +156,10 @@ async def book_appointment(
 async def search_availability(
     specialization: Optional[str] = None,
     language: Optional[str] = None,
-    date: Optional[date] = None,
+    target_date: Optional[date] = Query(default=None, alias="date"),
     clinic_id: Optional[UUID] = None,
+    skip: int = 0,
+    limit: int = 50,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
@@ -109,6 +168,31 @@ async def search_availability(
     Find doctors by specialization, language, and check availability.
     """
     try:
+        if skip < 0 or limit < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="skip must be >= 0 and limit must be >= 1"
+            )
+        if limit > settings.MAX_AVAILABILITY_RESULTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"limit must be <= {settings.MAX_AVAILABILITY_RESULTS}"
+            )
+
+        if target_date:
+            today = datetime.now(timezone.utc).date()
+            max_date = today + timedelta(days=settings.MAX_AVAILABILITY_DAYS)
+            if target_date < today or target_date > max_date:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"date must be between today and {max_date.isoformat()}"
+                )
+
+        if specialization and len(specialization) > 100:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="specialization too long")
+        if language and len(language) > 50:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="language too long")
+
         # Build doctor query based on filters
         query = db.query(Doctor).filter(Doctor.is_active == True)
 
@@ -119,7 +203,16 @@ async def search_availability(
         if language:
             query = query.filter(Doctor.languages.any(language))
 
-        doctors = query.all()
+        total = query.count()
+        doctors = query.offset(skip).limit(limit).all()
+
+        availability_map = {}
+        if target_date:
+            availability_map = availability_service.get_available_slots_for_doctors(
+                db=db,
+                doctors=doctors,
+                target_date=target_date
+            )
 
         # Get availability for each doctor if date is specified
         results = []
@@ -132,16 +225,19 @@ async def search_availability(
                 "languages": doctor.languages,
                 "working_days": doctor.working_days,
                 "working_hours": doctor.working_hours,
-                "slot_duration_minutes": doctor.slot_duration_minutes
+                "slot_duration_minutes": doctor.slot_duration_minutes,
+                "timezone": doctor.timezone
             }
 
-            if date:
+            if target_date:
                 try:
-                    availability = availability_service.get_available_slots(
-                        db=db,
-                        doctor_email=doctor.email,
-                        target_date=date
-                    )
+                    availability = availability_map.get(doctor.email)
+                    if availability is None:
+                        availability = availability_service.get_available_slots(
+                            db=db,
+                            doctor_email=doctor.email,
+                            target_date=target_date
+                        )
                     doctor_info["available_slots"] = availability.available_slots
                     doctor_info["is_available"] = len(availability.available_slots) > 0
                 except Exception as e:
@@ -159,10 +255,12 @@ async def search_availability(
             "search_criteria": {
                 "specialization": specialization,
                 "language": language,
-                "date": date.isoformat() if date else None,
-                "clinic_id": str(clinic_id) if clinic_id else None
+                "date": target_date.isoformat() if target_date else None,
+                "clinic_id": str(clinic_id) if clinic_id else None,
+                "skip": skip,
+                "limit": limit
             },
-            "total_results": len(results)
+            "total_results": total
         }
 
     except Exception as e:
@@ -171,6 +269,30 @@ async def search_availability(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search availability: {str(e)}"
         )
+
+
+@router.get("/availability/search")
+async def search_availability_alias(
+    specialization: Optional[str] = None,
+    language: Optional[str] = None,
+    target_date: Optional[date] = Query(default=None, alias="date"),
+    clinic_id: Optional[UUID] = None,
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Backward-compatible alias for availability search."""
+    return await search_availability(
+        specialization=specialization,
+        language=language,
+        target_date=target_date,
+        clinic_id=clinic_id,
+        skip=skip,
+        limit=limit,
+        db=db,
+        api_key=api_key
+    )
 
 
 @router.get("/{appointment_id}", response_model=AppointmentResponse)
@@ -201,6 +323,16 @@ async def get_doctor_appointments(
     api_key: str = Depends(verify_api_key)
 ):
     """Get appointments for a doctor with optional filters."""
+    if skip < 0 or limit < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="skip must be >= 0 and limit must be >= 1"
+        )
+    if limit > settings.MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"limit must be <= {settings.MAX_LIST_LIMIT}"
+        )
     query = db.query(Appointment).filter(Appointment.doctor_email == doctor_email)
     
     if start_date:
@@ -223,6 +355,16 @@ async def get_patient_appointments(
     api_key: str = Depends(verify_api_key)
 ):
     """Get appointments for a patient."""
+    if skip < 0 or limit < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="skip must be >= 0 and limit must be >= 1"
+        )
+    if limit > settings.MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"limit must be <= {settings.MAX_LIST_LIMIT}"
+        )
     appointments = db.query(Appointment).filter(
         Appointment.patient_id == patient_id
     ).order_by(Appointment.date.desc(), Appointment.start_time.desc()).offset(skip).limit(limit).all()
@@ -235,7 +377,8 @@ async def reschedule_appointment(
     appointment_id: UUID,
     reschedule_data: AppointmentReschedule,
     db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
+    api_key: str = Depends(verify_api_key),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")
 ):
     """
     Reschedule an appointment.
@@ -244,19 +387,63 @@ async def reschedule_appointment(
     1. DB transaction: Cancel old slot, book new slot
     2. Update Google Calendar event accordingly
     """
+    record = None
     try:
+        if idempotency_key:
+            record, existing = idempotency_service.begin(
+                db=db,
+                key=idempotency_key,
+                endpoint=f"PUT:/api/v1/appointments/{appointment_id}/reschedule",
+                payload=reschedule_data.model_dump()
+            )
+            if existing:
+                existing_result = idempotency_service.validate_existing(existing, reschedule_data.model_dump())
+                if existing_result["status"] == "conflict":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Idempotency key reuse with different payload"
+                    )
+                if existing_result["status"] == "completed":
+                    return JSONResponse(
+                        status_code=existing_result["response_status"],
+                        content=existing_result["response"]
+                    )
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={"status": "processing"}
+                )
+
         appointment = booking_service.reschedule_appointment(
             db=db,
             appointment_id=appointment_id,
             reschedule_data=reschedule_data
         )
-        return appointment
+        response_payload = AppointmentResponse.model_validate(appointment).model_dump()
+        if idempotency_key:
+            idempotency_service.complete(db, record, response_payload, status.HTTP_200_OK)
+        return response_payload
     except ValueError as e:
+        db.rollback()
+        if record:
+            idempotency_service.complete(
+                db,
+                record,
+                {"detail": str(e)},
+                status.HTTP_400_BAD_REQUEST
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        db.rollback()
+        if record:
+            idempotency_service.complete(
+                db,
+                record,
+                {"detail": f"Failed to reschedule appointment: {str(e)}"},
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         logger.error(f"Error rescheduling appointment: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -268,7 +455,8 @@ async def reschedule_appointment(
 async def cancel_appointment(
     appointment_id: UUID,
     db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
+    api_key: str = Depends(verify_api_key),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")
 ):
     """
     Cancel an appointment.
@@ -277,18 +465,62 @@ async def cancel_appointment(
     1. Mark appointment cancelled in DB
     2. Delete or update Google Calendar event
     """
+    record = None
     try:
+        if idempotency_key:
+            record, existing = idempotency_service.begin(
+                db=db,
+                key=idempotency_key,
+                endpoint=f"DELETE:/api/v1/appointments/{appointment_id}",
+                payload={"appointment_id": str(appointment_id)}
+            )
+            if existing:
+                existing_result = idempotency_service.validate_existing(existing, {"appointment_id": str(appointment_id)})
+                if existing_result["status"] == "conflict":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Idempotency key reuse with different payload"
+                    )
+                if existing_result["status"] == "completed":
+                    return JSONResponse(
+                        status_code=existing_result["response_status"],
+                        content=existing_result["response"]
+                    )
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={"status": "processing"}
+                )
+
         appointment = booking_service.cancel_appointment(
             db=db,
             appointment_id=appointment_id
         )
-        return appointment
+        response_payload = AppointmentResponse.model_validate(appointment).model_dump()
+        if idempotency_key:
+            idempotency_service.complete(db, record, response_payload, status.HTTP_200_OK)
+        return response_payload
     except ValueError as e:
+        db.rollback()
+        if record:
+            idempotency_service.complete(
+                db,
+                record,
+                {"detail": str(e)},
+                status.HTTP_400_BAD_REQUEST
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        db.rollback()
+        if record:
+            idempotency_service.complete(
+                db,
+                record,
+                {"detail": f"Failed to cancel appointment: {str(e)}"},
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         logger.error(f"Error cancelling appointment: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -309,6 +541,17 @@ async def export_doctors_data(
     Returns enriched JSON data about doctors for LLM context.
     """
     try:
+        now = datetime.now(timezone.utc)
+        cache_ts = _doctor_export_cache.get("timestamp")
+        cache_clinic = _doctor_export_cache.get("clinic_id")
+        if (
+            cache_ts
+            and (now - cache_ts).total_seconds() <= settings.DOCTOR_EXPORT_CACHE_TTL_SECONDS
+            and cache_clinic == (str(clinic_id) if clinic_id else None)
+            and _doctor_export_cache.get("data")
+        ):
+            return _doctor_export_cache["data"]
+
         query = db.query(Doctor).filter(Doctor.is_active == True)
 
         if clinic_id:
@@ -330,15 +573,21 @@ async def export_doctors_data(
                 "working_hours": doctor.working_hours,
                 "slot_duration_minutes": doctor.slot_duration_minutes,
                 "general_working_days_text": doctor.general_working_days_text,
-                "clinic_id": str(doctor.clinic_id)
+                "clinic_id": str(doctor.clinic_id),
+                "timezone": doctor.timezone
             }
             doctors_data.append(doctor_dict)
 
-        return {
+        response_payload = {
             "doctors": doctors_data,
-            "export_timestamp": datetime.utcnow().isoformat(),
+            "export_timestamp": now.isoformat(),
             "total_doctors": len(doctors_data)
         }
+        _doctor_export_cache["timestamp"] = now
+        _doctor_export_cache["clinic_id"] = str(clinic_id) if clinic_id else None
+        _doctor_export_cache["data"] = response_payload
+
+        return response_payload
 
     except Exception as e:
         logger.error(f"Error exporting doctor data: {str(e)}")

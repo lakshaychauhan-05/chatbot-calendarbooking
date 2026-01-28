@@ -3,7 +3,7 @@ Pydantic models for chat functionality.
 """
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -18,7 +18,7 @@ class ChatMessage(BaseModel):
     """A single chat message."""
     role: MessageRole
     content: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -88,7 +88,7 @@ class ChatResponse(BaseModel):
     suggested_actions: Optional[List[str]] = []
     requires_confirmation: bool = False
     booking_details: Optional[Dict[str, Any]] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Conversation(BaseModel):
@@ -98,8 +98,8 @@ class Conversation(BaseModel):
     messages: List[ChatMessage] = Field(default_factory=list)
     state: ConversationState = ConversationState.INITIAL
     context: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: Optional[datetime] = None
 
 

@@ -8,14 +8,14 @@ import logging
 
 from app.database import get_db
 from app.services.calendar_sync_service import CalendarSyncService
-from app.services.calendar_watch_service import CalendarWatchService
+from app.services.calendar_watch_service import calendar_watch_service
 from app.config import settings
+import secrets
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 calendar_sync_service = CalendarSyncService()
-calendar_watch_service = CalendarWatchService()
 
 
 @router.post("/google-calendar")
@@ -50,7 +50,7 @@ async def handle_google_calendar_notification(
     )
     
     # 1. Verify webhook authenticity
-    if not verify_google_webhook(x_goog_channel_token):
+    if not verify_google_webhook(x_goog_channel_id, x_goog_channel_token, db):
         logger.warning(f"Invalid webhook token: {x_goog_channel_token}")
         raise HTTPException(status_code=401, detail="Invalid webhook token")
     
@@ -105,22 +105,30 @@ async def handle_google_calendar_notification(
         )
 
 
-def verify_google_webhook(channel_token: Optional[str]) -> bool:
+def verify_google_webhook(channel_id: Optional[str], channel_token: Optional[str], db: Session) -> bool:
     """
     Verify that webhook is from Google.
     Compares the token sent by Google with our stored secret.
     
     Args:
+        channel_id: Channel ID from X-Goog-Channel-Id header
         channel_token: Token from X-Goog-Channel-Token header
+        db: Database session
         
     Returns:
         True if token is valid, False otherwise
     """
-    if not channel_token:
+    if not channel_token or not channel_id:
         return False
-    
-    # Compare with stored token
-    return channel_token == settings.GOOGLE_CALENDAR_WEBHOOK_SECRET
+
+    channel_info = calendar_watch_service.get_channel_info(channel_id, db)
+    if channel_info and channel_info.get("token"):
+        return secrets.compare_digest(channel_token, channel_info["token"])
+
+    # Fallback to shared secret for legacy channels
+    if settings.GOOGLE_CALENDAR_WEBHOOK_SECRET:
+        return secrets.compare_digest(channel_token, settings.GOOGLE_CALENDAR_WEBHOOK_SECRET)
+    return False
 
 
 @router.get("/google-calendar/test")

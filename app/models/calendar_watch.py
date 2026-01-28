@@ -2,7 +2,7 @@
 CalendarWatch model - tracks Google Calendar push notification channels.
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, DateTime, Boolean, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -21,9 +21,10 @@ class CalendarWatch(Base):
     doctor_email = Column(String(255), ForeignKey("doctors.email", ondelete="CASCADE"), nullable=False, index=True)
     channel_id = Column(String(255), unique=True, nullable=False, index=True)
     resource_id = Column(String(255), nullable=False)
-    expiration = Column(DateTime, nullable=False)
+    token = Column(String(255), nullable=False)
+    expiration = Column(DateTime(timezone=True), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     
     # Relationship
     doctor = relationship("Doctor", backref="calendar_watches")

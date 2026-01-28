@@ -6,6 +6,7 @@ Never sends schedule, slots, or availability.
 import httpx
 import logging
 from typing import Optional
+import time
 from app.config import settings
 from app.models.doctor import Doctor
 
@@ -47,7 +48,7 @@ class RAGSyncService:
         try:
             # Prepare payload with ONLY allowed fields
             payload = {
-                "doctor_id": str(doctor.id),
+                "doctor_id": doctor.email,
                 "clinic_id": str(doctor.clinic_id),
                 "name": doctor.name,
                 "specialization": doctor.specialization,
@@ -69,22 +70,27 @@ class RAGSyncService:
             }
             
             # Make HTTP request to RAG service
-            with httpx.Client(timeout=10.0) as client:
-                response = client.post(
-                    f"{self.rag_service_url}/doctors/sync",
-                    json=payload,
-                    headers=headers
-                )
-                
+            for attempt in range(3):
+                with httpx.Client(timeout=10.0) as client:
+                    response = client.post(
+                        f"{self.rag_service_url}/doctors/sync",
+                        json=payload,
+                        headers=headers
+                    )
+
                 if response.status_code == 200:
                     logger.info(f"Successfully synced doctor {doctor.id} to RAG service")
                     return True
-                else:
-                    logger.error(
-                        f"Failed to sync doctor {doctor.id} to RAG service: "
-                        f"Status {response.status_code}, Response: {response.text}"
-                    )
-                    return False
+
+                if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+
+                logger.error(
+                    f"Failed to sync doctor {doctor.id} to RAG service: "
+                    f"Status {response.status_code}, Response: {response.text}"
+                )
+                return False
                     
         except Exception as e:
             logger.error(f"Error syncing doctor {doctor.id} to RAG service: {str(e)}")
@@ -109,21 +115,26 @@ class RAGSyncService:
                 "X-API-Key": self.rag_api_key,
             }
             
-            with httpx.Client(timeout=10.0) as client:
-                response = client.delete(
-                    f"{self.rag_service_url}/doctors/{doctor_id}",
-                    headers=headers
-                )
-                
+            for attempt in range(3):
+                with httpx.Client(timeout=10.0) as client:
+                    response = client.delete(
+                        f"{self.rag_service_url}/doctors/{doctor_id}",
+                        headers=headers
+                    )
+
                 if response.status_code in [200, 204]:
                     logger.info(f"Successfully deleted doctor {doctor_id} from RAG service")
                     return True
-                else:
-                    logger.error(
-                        f"Failed to delete doctor {doctor_id} from RAG service: "
-                        f"Status {response.status_code}"
-                    )
-                    return False
+
+                if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+
+                logger.error(
+                    f"Failed to delete doctor {doctor_id} from RAG service: "
+                    f"Status {response.status_code}"
+                )
+                return False
                     
         except Exception as e:
             logger.error(f"Error deleting doctor {doctor_id} from RAG service: {str(e)}")

@@ -16,14 +16,13 @@ from app.schemas.doctor import (
     DoctorListResponse
 )
 from app.services.rag_sync_service import RAGSyncService
-from app.services.calendar_watch_service import CalendarWatchService
+from app.services.calendar_watch_service import calendar_watch_service
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 rag_sync_service = RAGSyncService()
-calendar_watch_service = CalendarWatchService()
 
 
 @router.post("/", response_model=DoctorResponse, status_code=status.HTTP_201_CREATED)
@@ -64,7 +63,6 @@ async def create_doctor(
                 doctor_email=doctor.email,
                 db=db
             )
-            logger.info(f"Successfully set up calendar watch for {doctor.email}")
             logger.info(f"Successfully set up calendar watch for {doctor.email}")
         except Exception as e:
             logger.error(f"Failed to set up calendar watch: {str(e)}")
@@ -109,6 +107,17 @@ async def list_doctors(
     api_key: str = Depends(verify_api_key)
 ):
     """List doctors with optional filters."""
+    from app.config import settings
+    if skip < 0 or limit < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="skip must be >= 0 and limit must be >= 1"
+        )
+    if limit > settings.MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"limit must be <= {settings.MAX_LIST_LIMIT}"
+        )
     query = db.query(Doctor)
     
     if clinic_id:
@@ -251,3 +260,30 @@ async def delete_doctor_leave(
     db.commit()
     
     return None
+
+
+@router.delete("/{doctor_email}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_doctor(
+    doctor_email: str,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Hard delete a doctor and all related records."""
+    doctor = db.query(Doctor).filter(Doctor.email == doctor_email).first()
+    if not doctor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Doctor with email '{doctor_email}' not found"
+        )
+
+    try:
+        db.delete(doctor)
+        db.commit()
+        return None
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting doctor {doctor_email}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete doctor: {str(e)}"
+        )

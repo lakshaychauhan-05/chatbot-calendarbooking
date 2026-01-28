@@ -20,11 +20,12 @@ def upgrade() -> None:
     # Update calendar_watches table foreign key to use doctor_email
     # This migration assumes the previous migration changed doctors.id to doctors.email as primary key
 
-    # Drop existing foreign key constraint
-    op.drop_constraint('calendar_watches_doctor_id_fkey', 'calendar_watches', type_='foreignkey')
+    # Drop existing foreign key constraint if present
+    op.execute("ALTER TABLE calendar_watches DROP CONSTRAINT IF EXISTS calendar_watches_doctor_id_fkey")
+    op.execute("ALTER TABLE calendar_watches DROP CONSTRAINT IF EXISTS calendar_watches_doctor_email_fkey")
 
     # Drop the old doctor_id column
-    op.drop_column('calendar_watches', 'doctor_id')
+    op.execute("ALTER TABLE calendar_watches DROP COLUMN IF EXISTS doctor_id")
 
     # The doctor_email column should already exist from model changes
     # Create new foreign key constraint

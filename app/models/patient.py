@@ -2,7 +2,7 @@
 Patient model - represents a patient.
 """
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from sqlalchemy import Column, String, Integer, Date, DateTime, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -22,7 +22,7 @@ class Patient(Base):
     email = Column(String(255), nullable=True)
     gender = Column(String(20), nullable=True)
     date_of_birth = Column(Date, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     
     # Relationships
     appointments = relationship("Appointment", back_populates="patient", cascade="all, delete-orphan")

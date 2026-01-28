@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional
 from datetime import date, time
 
 from app.core.config import settings
+from app.middleware.request_id import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,15 @@ class CalendarClient:
             timeout=30.0,
             headers={"X-API-Key": self.api_key}
         )
+
+    def _build_headers(self, idempotency_key: Optional[str] = None) -> Optional[Dict[str, str]]:
+        headers: Dict[str, str] = {}
+        request_id = get_request_id()
+        if request_id and request_id != "-":
+            headers["X-Request-ID"] = request_id
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return headers or None
 
     async def __aenter__(self):
         return self
@@ -37,7 +47,8 @@ class CalendarClient:
 
             response = await self.client.get(
                 f"{self.base_url}/api/v1/appointments/doctors/export",
-                params=params
+                params=params,
+                headers=self._build_headers()
             )
             response.raise_for_status()
             return response.json()
@@ -49,7 +60,7 @@ class CalendarClient:
                 error_detail = e.response.text
                 logger.error(f"HTTP Status: {status_code}, Detail: {error_detail}")
                 if status_code == 401:
-                    logger.error(f"Authentication failed. Check API key. Using key: {self.api_key[:10]}...")
+                    logger.error("Authentication failed. Check API key configuration.")
                     logger.error(f"Calendar service URL: {self.base_url}")
             return {"doctors": [], "error": str(e)}
 
@@ -69,7 +80,8 @@ class CalendarClient:
 
             response = await self.client.get(
                 f"{self.base_url}/api/v1/appointments/availability-search",
-                params=params
+                params=params,
+                headers=self._build_headers()
             )
             response.raise_for_status()
             return response.json()
@@ -87,7 +99,8 @@ class CalendarClient:
         try:
             response = await self.client.get(
                 f"{self.base_url}/api/v1/appointments/availability/{doctor_email}",
-                params={"date": date.isoformat()}
+                params={"date": date.isoformat()},
+                headers=self._build_headers()
             )
             response.raise_for_status()
             return response.json()
@@ -96,12 +109,14 @@ class CalendarClient:
             logger.error(f"Error getting doctor availability: {e}")
             return {"available_slots": [], "error": str(e)}
 
-    async def book_appointment(self, booking_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def book_appointment(self, booking_data: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
         """Book an appointment."""
         try:
+            headers = self._build_headers(idempotency_key)
             response = await self.client.post(
                 f"{self.base_url}/api/v1/appointments/",
-                json=booking_data
+                json=booking_data,
+                headers=headers
             )
             response.raise_for_status()
             return response.json()
@@ -114,7 +129,8 @@ class CalendarClient:
         """Get appointment details."""
         try:
             response = await self.client.get(
-                f"{self.base_url}/api/v1/appointments/{appointment_id}"
+                f"{self.base_url}/api/v1/appointments/{appointment_id}",
+                headers=self._build_headers()
             )
             response.raise_for_status()
             return response.json()
@@ -123,12 +139,14 @@ class CalendarClient:
             logger.error(f"Error getting appointment: {e}")
             return {"error": str(e)}
 
-    async def reschedule_appointment(self, appointment_id: str, reschedule_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def reschedule_appointment(self, appointment_id: str, reschedule_data: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
         """Reschedule an appointment."""
         try:
+            headers = self._build_headers(idempotency_key)
             response = await self.client.put(
                 f"{self.base_url}/api/v1/appointments/{appointment_id}/reschedule",
-                json=reschedule_data
+                json=reschedule_data,
+                headers=headers
             )
             response.raise_for_status()
             return response.json()
@@ -137,11 +155,13 @@ class CalendarClient:
             logger.error(f"Error rescheduling appointment: {e}")
             return {"error": str(e)}
 
-    async def cancel_appointment(self, appointment_id: str) -> Dict[str, Any]:
+    async def cancel_appointment(self, appointment_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
         """Cancel an appointment."""
         try:
+            headers = self._build_headers(idempotency_key)
             response = await self.client.delete(
-                f"{self.base_url}/api/v1/appointments/{appointment_id}"
+                f"{self.base_url}/api/v1/appointments/{appointment_id}",
+                headers=headers
             )
             response.raise_for_status()
             return response.json()
@@ -154,7 +174,8 @@ class CalendarClient:
         """Get appointments for a patient."""
         try:
             response = await self.client.get(
-                f"{self.base_url}/api/v1/appointments/patient/{patient_id}"
+                f"{self.base_url}/api/v1/appointments/patient/{patient_id}",
+                headers=self._build_headers()
             )
             response.raise_for_status()
             return response.json()
@@ -162,6 +183,19 @@ class CalendarClient:
         except httpx.HTTPError as e:
             logger.error(f"Error getting patient appointments: {e}")
             return []
+
+    async def get_patient_by_mobile(self, mobile_number: str) -> Dict[str, Any]:
+        """Get patient by mobile number."""
+        try:
+            response = await self.client.get(
+                f"{self.base_url}/api/v1/patients/mobile/{mobile_number}",
+                headers=self._build_headers()
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Error getting patient by mobile: {e}")
+            return {"error": str(e)}
 
     def is_available(self) -> bool:
         """Check if calendar service is available."""

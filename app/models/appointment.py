@@ -2,9 +2,10 @@
 Appointment model - represents a booked appointment.
 """
 import uuid
-from datetime import datetime, date, time
-from sqlalchemy import Column, String, Date, Time, DateTime, ForeignKey, Enum as SQLEnum, Index
-from sqlalchemy.dialects.postgresql import UUID
+from datetime import datetime, date, time, timezone
+from sqlalchemy import Column, String, Date, Time, DateTime, ForeignKey, Enum as SQLEnum, Index, Integer
+from sqlalchemy.dialects.postgresql import UUID, ExcludeConstraint
+from sqlalchemy import func
 from sqlalchemy.orm import relationship
 import enum
 from app.database import Base
@@ -38,10 +39,17 @@ class Appointment(Base):
     date = Column(Date, nullable=False, index=True)
     start_time = Column(Time, nullable=False)
     end_time = Column(Time, nullable=False)
+    timezone = Column(String(64), nullable=False, default="UTC")
+    start_at_utc = Column(DateTime(timezone=True), nullable=False, index=True)
+    end_at_utc = Column(DateTime(timezone=True), nullable=False, index=True)
     status = Column(SQLEnum(AppointmentStatus), default=AppointmentStatus.BOOKED, nullable=False, index=True)
     google_calendar_event_id = Column(String(255), nullable=True, unique=True, index=True)
+    calendar_sync_status = Column(String(20), nullable=False, default="PENDING", index=True)
+    calendar_sync_attempts = Column(Integer, nullable=False, default=0)
+    calendar_sync_next_attempt_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    calendar_sync_last_error = Column(String(500), nullable=True)
     source = Column(SQLEnum(AppointmentSource), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     
     # Relationships
     doctor = relationship("Doctor", back_populates="appointments")
@@ -50,6 +58,13 @@ class Appointment(Base):
     # Composite index for availability queries
     __table_args__ = (
         Index('idx_appointment_doctor_date_status', 'doctor_email', 'date', 'status'),
+        Index('idx_appointment_doctor_date_start', 'doctor_email', 'date', 'start_time'),
+        ExcludeConstraint(
+            ("doctor_email", "="),
+            (func.tstzrange(start_at_utc, end_at_utc, "[]"), "&&"),
+            name="exclude_overlapping_appointments",
+            where=status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED])
+        ),
     )
     
     def __repr__(self):

@@ -1,7 +1,10 @@
 """
 Calendar Watch Service - manages Google Calendar push notification channels.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import threading
+import time
+import secrets
 from sqlalchemy.orm import Session
 import uuid
 import logging
@@ -9,6 +12,7 @@ import logging
 from app.services.google_calendar_service import GoogleCalendarService
 from app.models.calendar_watch import CalendarWatch
 from app.config import settings
+from app.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +22,36 @@ class CalendarWatchService:
     
     def __init__(self):
         self.calendar_service = GoogleCalendarService()
+        self._worker: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    def start(self) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        self._stop_event.clear()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+        logger.info("Calendar watch renewal worker started")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._worker:
+            self._worker.join(timeout=5)
+
+    def is_running(self) -> bool:
+        return bool(self._worker and self._worker.is_alive())
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                db = SessionLocal()
+                try:
+                    self.renew_expiring_watches(db)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.error(f"Calendar watch renewal worker error: {e}")
+            time.sleep(3600)
     
     def setup_watch_for_doctor(
         self,
@@ -43,6 +77,9 @@ class CalendarWatchService:
             
             # Webhook URL where Google will send notifications
             webhook_url = f"{settings.WEBHOOK_BASE_URL}/api/v1/webhooks/google-calendar"
+
+            # Unique token per watch for verification
+            token = secrets.token_urlsafe(32)
             
             # Create watch request
             # Note: Google Calendar watches expire after max 7 days (604800000 ms)
@@ -50,8 +87,8 @@ class CalendarWatchService:
                 'id': channel_id,
                 'type': 'web_hook',
                 'address': webhook_url,
-                'token': settings.GOOGLE_CALENDAR_WEBHOOK_SECRET,
-                'expiration': int((datetime.utcnow() + timedelta(days=7)).timestamp() * 1000)
+                'token': token,
+                'expiration': int((datetime.now(timezone.utc) + timedelta(days=7)).timestamp() * 1000)
             }
             
             # Execute watch request
@@ -65,8 +102,10 @@ class CalendarWatchService:
                 doctor_email=doctor_email,
                 channel_id=channel_id,
                 resource_id=watch_response['resourceId'],
+                token=token,
                 expiration=datetime.fromtimestamp(
-                    int(watch_response['expiration']) / 1000
+                    int(watch_response['expiration']) / 1000,
+                    tz=timezone.utc
                 ),
                 is_active=True
             )
@@ -164,7 +203,7 @@ class CalendarWatchService:
         # Find watches expiring in next 24 hours
         expiring_soon = db.query(CalendarWatch).filter(
             CalendarWatch.is_active == True,
-            CalendarWatch.expiration < datetime.utcnow() + timedelta(days=1)
+            CalendarWatch.expiration < datetime.now(timezone.utc) + timedelta(days=1)
         ).all()
         
         logger.info(f"Found {len(expiring_soon)} watches expiring soon")
@@ -194,6 +233,10 @@ class CalendarWatchService:
         
         if watch:
             return {
-                'doctor_email': watch.doctor_email
+                'doctor_email': watch.doctor_email,
+                'token': watch.token
             }
         return None
+
+
+calendar_watch_service = CalendarWatchService()

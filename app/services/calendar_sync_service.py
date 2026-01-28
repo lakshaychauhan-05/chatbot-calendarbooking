@@ -2,7 +2,7 @@
 Calendar Sync Service - syncs changes between Google Calendar and Database.
 Handles bidirectional synchronization with conflict resolution.
 """
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timezone
 from sqlalchemy.orm import Session
 from typing import Dict, List, Optional
 import logging
@@ -12,6 +12,8 @@ from app.services.availability_service import AvailabilityService
 from app.models.appointment import Appointment, AppointmentStatus, AppointmentSource
 from app.models.doctor import Doctor
 from app.models.patient import Patient
+from app.config import settings
+from app.utils.datetime_utils import to_utc
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,7 @@ class CalendarSyncService:
         db_appointments = db.query(Appointment).filter(
             Appointment.doctor_email == doctor.email,
             Appointment.date >= date.today(),
-            Appointment.status == AppointmentStatus.BOOKED
+            Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED])
         ).all()
         
         # 3. Create lookup maps
@@ -119,15 +121,17 @@ class CalendarSyncService:
             service = self.calendar_service._get_service(doctor_email)
             
             # Fetch events from today onwards
-            now = datetime.utcnow().isoformat() + 'Z'
+            now = datetime.now(timezone.utc).isoformat()
             
-            events_result = service.events().list(
-                calendarId=doctor_email,
-                timeMin=now,
-                maxResults=100,  # Adjust as needed
-                singleEvents=True,
-                orderBy='startTime'
-            ).execute()
+            events_result = self.calendar_service._execute_with_retry(
+                lambda: service.events().list(
+                    calendarId=doctor_email,
+                    timeMin=now,
+                    maxResults=100,  # Adjust as needed
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+            )
             
             events = events_result.get('items', [])
             logger.info(f"Fetched {len(events)} events from {doctor_email}")
@@ -153,10 +157,16 @@ class CalendarSyncService:
         cal_start = datetime.fromisoformat(cal_start_str.replace('Z', '+00:00'))
         cal_end = datetime.fromisoformat(cal_end_str.replace('Z', '+00:00'))
         
-        # Compare with DB
+        # Compare with DB using UTC if available
+        if db_appointment.start_at_utc and db_appointment.end_at_utc:
+            return (
+                cal_start.astimezone(timezone.utc) != db_appointment.start_at_utc or
+                cal_end.astimezone(timezone.utc) != db_appointment.end_at_utc
+            )
+
         db_start = datetime.combine(db_appointment.date, db_appointment.start_time)
         db_end = datetime.combine(db_appointment.date, db_appointment.end_time)
-        
+
         return (
             cal_start.date() != db_start.date() or
             cal_start.time() != db_start.time() or
@@ -190,7 +200,8 @@ class CalendarSyncService:
                 doctor_email=doctor.email,
                 slot_date=new_date,
                 slot_start_time=new_start_time,
-                slot_end_time=new_end_time
+                slot_end_time=new_end_time,
+                exclude_appointment_id=db_appointment.id
             )
             
             if not is_available:
@@ -210,10 +221,16 @@ class CalendarSyncService:
                 return 'conflicts'
             
             # Update appointment in database
+            appointment_tz = doctor.timezone or settings.DEFAULT_TIMEZONE
             db_appointment.date = new_date
             db_appointment.start_time = new_start_time
             db_appointment.end_time = new_end_time
+            db_appointment.timezone = appointment_tz
+            db_appointment.start_at_utc = to_utc(new_date, new_start_time, appointment_tz)
+            db_appointment.end_at_utc = to_utc(new_date, new_end_time, appointment_tz)
             db_appointment.status = AppointmentStatus.RESCHEDULED
+            db_appointment.calendar_sync_status = "SYNCED"
+            db_appointment.calendar_sync_last_error = None
             
             logger.info(
                 f"Updated appointment {db_appointment.id} from calendar: "
@@ -272,19 +289,21 @@ class CalendarSyncService:
             
             # Create "placeholder" appointment for doctor-created events
             # Get or create placeholder patient
+            placeholder_mobile = f"WALKIN-{doctor.email}"
             placeholder_patient = db.query(Patient).filter(
-                Patient.mobile_number == "PLACEHOLDER"
+                Patient.mobile_number == placeholder_mobile
             ).first()
             
             if not placeholder_patient:
                 placeholder_patient = Patient(
                     name="Walk-in Patient",
-                    mobile_number="PLACEHOLDER"
+                    mobile_number=placeholder_mobile
                 )
                 db.add(placeholder_patient)
                 db.flush()
             
             # Create appointment
+            appointment_tz = doctor.timezone or settings.DEFAULT_TIMEZONE
             appointment = Appointment(
                 doctor_email=doctor.email,
                 patient_id=placeholder_patient.id,
@@ -293,8 +312,12 @@ class CalendarSyncService:
                 end_time=cal_end.time(),
                 status=AppointmentStatus.BOOKED,
                 google_calendar_event_id=calendar_event['id'],
-                source=AppointmentSource.ADMIN  # Doctor created it manually
+                source=AppointmentSource.ADMIN,  # Doctor created it manually
+                timezone=appointment_tz,
+                start_at_utc=to_utc(cal_start.date(), cal_start.time(), appointment_tz),
+                end_at_utc=to_utc(cal_end.date(), cal_end.time(), appointment_tz)
             )
+            appointment.calendar_sync_status = "SYNCED"
             
             db.add(appointment)
             
@@ -319,6 +342,8 @@ class CalendarSyncService:
             # Doctor deleted appointment from calendar
             # Mark as cancelled in DB
             db_appointment.status = AppointmentStatus.CANCELLED
+            db_appointment.calendar_sync_status = "SYNCED"
+            db_appointment.calendar_sync_last_error = None
             
             logger.info(
                 f"Marked appointment {db_appointment.id} as cancelled "
@@ -347,7 +372,8 @@ class CalendarSyncService:
                 appointment_date=db_appointment.date,
                 start_time=db_appointment.start_time,
                 end_time=db_appointment.end_time,
-                description=f"[REVERTED] Slot conflict detected. Original time restored."
+                description=f"[REVERTED] Slot conflict detected. Original time restored.",
+                timezone_name=db_appointment.timezone
             )
             
             logger.info(f"Reverted calendar event {event_id} to DB version")

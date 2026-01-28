@@ -2,7 +2,7 @@
 Doctor model - represents a doctor in the clinic.
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Integer, Boolean, JSON, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import relationship
@@ -32,9 +32,10 @@ class Doctor(Base):
     working_days = Column(JSON, nullable=False)  # e.g., ["monday", "tuesday", "wednesday"]
     working_hours = Column(JSON, nullable=False)  # e.g., {"start": "09:00", "end": "17:00"}
     slot_duration_minutes = Column(Integer, nullable=False, default=30)
+    timezone = Column(String(64), nullable=False, default="UTC")
     is_active = Column(Boolean, default=True, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
     
     # Relationships
     appointments = relationship("Appointment", back_populates="doctor", cascade="all, delete-orphan")

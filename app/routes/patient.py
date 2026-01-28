@@ -17,6 +17,7 @@ from app.schemas.patient import (
     PatientHistoryCreate,
     PatientHistoryResponse
 )
+import re
 import logging
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,26 @@ async def get_patient_by_mobile(
     api_key: str = Depends(verify_api_key)
 ):
     """Get patient by mobile number."""
-    patient = db.query(Patient).filter(Patient.mobile_number == mobile_number).first()
+    cleaned = re.sub(r"[^\d+]", "", mobile_number or "")
+    if cleaned.startswith("++"):
+        cleaned = cleaned[1:]
+    has_plus = cleaned.startswith("+")
+    digits = re.sub(r"\D", "", cleaned)
+    if has_plus:
+        if len(digits) != 12 or not digits.startswith("91"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="mobile_number must be 10 digits, with optional +91 prefix"
+            )
+        normalized = f"+{digits}"
+    else:
+        if len(digits) != 10:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="mobile_number must be 10 digits, with optional +91 prefix"
+            )
+        normalized = digits
+    patient = db.query(Patient).filter(Patient.mobile_number == normalized).first()
     if not patient:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # Redis (optional, for conversation state)
     REDIS_URL: Optional[str] = None
 
+    # CORS
+    CORS_ALLOW_ORIGINS: Optional[str] = None
+
+    # Rate limiting
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 120
+    RATE_LIMIT_BURST: int = 30
+
     # WebSocket
     WEBSOCKET_PING_INTERVAL: int = 30
     WEBSOCKET_PING_TIMEOUT: int = 10

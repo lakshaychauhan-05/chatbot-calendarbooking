@@ -2,7 +2,7 @@
 Patient medical history model.
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import relationship
@@ -22,7 +22,7 @@ class PatientHistory(Base):
     medical_conditions = Column(ARRAY(String), nullable=True, default=list)
     allergies = Column(ARRAY(String), nullable=True, default=list)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     
     # Relationships
     patient = relationship("Patient", back_populates="history")
