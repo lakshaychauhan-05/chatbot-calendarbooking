@@ -61,6 +61,12 @@ async def list_clinics(is_active: Optional[bool] = None, skip: int = 0, limit: i
     return await _request_core("GET", "/api/v1/clinics", params={"is_active": is_active, "skip": skip, "limit": limit})
 
 
+@router.get("/clinics/{clinic_id}")
+async def get_clinic(clinic_id: UUID):
+    """Get a single clinic by ID."""
+    return await _request_core("GET", f"/api/v1/clinics/{clinic_id}")
+
+
 @router.post("/clinics", status_code=status.HTTP_201_CREATED)
 async def create_clinic(payload: Dict[str, Any]):
     return await _request_core("POST", "/api/v1/clinics", json=payload)

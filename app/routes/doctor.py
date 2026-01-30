@@ -37,6 +37,14 @@ async def create_doctor(
     After DB commit, triggers RAG sync with descriptive fields only.
     """
     try:
+        # Validate clinic exists
+        clinic = db.query(Clinic).filter(Clinic.id == doctor_data.clinic_id).first()
+        if not clinic:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Clinic with id '{doctor_data.clinic_id}' not found. Please create the clinic first or use a valid clinic ID."
+            )
+
         # Check if email already exists (case-sensitive)
         existing = db.query(Doctor).filter(Doctor.email == doctor_data.email).first()
         if existing:
@@ -44,7 +52,7 @@ async def create_doctor(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"A doctor with the email address '{doctor_data.email}' already exists. Each doctor must have a unique email address. Please use a different email address."
             )
-        
+
         # Create doctor
         doctor = Doctor(**doctor_data.model_dump())
         db.add(doctor)
