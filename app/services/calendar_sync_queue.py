@@ -233,7 +233,7 @@ class CalendarSyncQueue:
                         job.status = "COMPLETED"
                         db.commit()
                         return
-                    job.last_error = "Calendar event creation failed"
+                    job.last_error = self._calendar_service.last_error or "Calendar event creation failed"
                 else:
                     result = self._calendar_service.update_event(
                         doctor_email=appointment.doctor_email,
@@ -256,7 +256,7 @@ class CalendarSyncQueue:
                         job.status = "COMPLETED"
                         db.commit()
                         return
-                    job.last_error = "Calendar event update failed"
+                    job.last_error = self._calendar_service.last_error or "Calendar event update failed"
                 # fall through to retry logic
 
             if job.action == "DELETE":
@@ -276,7 +276,7 @@ class CalendarSyncQueue:
                     job.status = "COMPLETED"
                     db.commit()
                     return
-                job.last_error = "Calendar event delete failed"
+                job.last_error = self._calendar_service.last_error or "Calendar event delete failed"
 
             # Retry or fail
             job.status = "PENDING"

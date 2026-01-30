@@ -18,12 +18,13 @@ logger = logging.getLogger(__name__)
 
 class GoogleCalendarService:
     """Service for interacting with Google Calendar API."""
-    
+
     def __init__(self):
         """Initialize Google Calendar service with service account credentials."""
         self.credentials_path = settings.GOOGLE_CALENDAR_CREDENTIALS_PATH
         self.delegated_admin_email = settings.GOOGLE_CALENDAR_DELEGATED_ADMIN_EMAIL
         self._service = None
+        self.last_error: Optional[str] = None  # Stores detailed error from last failed operation
     
     def _get_service(self, user_email: str):
         """
@@ -116,11 +117,11 @@ class GoogleCalendarService:
                 'description': description or f'Appointment with {patient_name}',
                 'start': {
                     'dateTime': start_rfc3339,
-                'timeZone': str(tz),
+                    'timeZone': str(tz),
                 },
                 'end': {
                     'dateTime': end_rfc3339,
-                'timeZone': str(tz),
+                    'timeZone': str(tz),
                 },
             }
             
@@ -132,11 +133,13 @@ class GoogleCalendarService:
             return event.get('id')
             
         except HttpError as e:
-            logger.error(f"Failed to create Google Calendar event: {str(e)}")
+            self.last_error = f"Google API error: {str(e)}"
+            logger.error(f"Failed to create Google Calendar event: {self.last_error}")
             # Don't raise - Google Calendar is just a mirror
             return None
         except Exception as e:
-            logger.error(f"Unexpected error creating Google Calendar event: {str(e)}")
+            self.last_error = f"Unexpected error: {str(e)}"
+            logger.error(f"Unexpected error creating Google Calendar event: {self.last_error}")
             return None
     
     def update_event(
@@ -221,10 +224,12 @@ class GoogleCalendarService:
             return True
 
         except HttpError as e:
-            logger.error(f"Failed to update Google Calendar event: {str(e)}")
+            self.last_error = f"Google API error: {str(e)}"
+            logger.error(f"Failed to update Google Calendar event: {self.last_error}")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error updating Google Calendar event: {str(e)}")
+            self.last_error = f"Unexpected error: {str(e)}"
+            logger.error(f"Unexpected error updating Google Calendar event: {self.last_error}")
             return False
     
     def delete_event(self, doctor_email: str, event_id: str) -> bool:
@@ -254,10 +259,12 @@ class GoogleCalendarService:
                 # Event already deleted, consider it success
                 logger.warning(f"Google Calendar event {event_id} not found (already deleted?)")
                 return True
-            logger.error(f"Failed to delete Google Calendar event: {str(e)}")
+            self.last_error = f"Google API error: {str(e)}"
+            logger.error(f"Failed to delete Google Calendar event: {self.last_error}")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error deleting Google Calendar event: {str(e)}")
+            self.last_error = f"Unexpected error: {str(e)}"
+            logger.error(f"Unexpected error deleting Google Calendar event: {self.last_error}")
             return False
 
     def _execute_with_retry(self, func, max_attempts: int = 3, base_delay_seconds: int = 1):

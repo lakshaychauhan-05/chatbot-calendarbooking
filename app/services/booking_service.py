@@ -335,7 +335,7 @@ class BookingService:
                 db.commit()
                 db.refresh(appointment)
             else:
-                appointment.calendar_sync_last_error = "Calendar sync failed"
+                appointment.calendar_sync_last_error = cal.last_error or "Calendar sync failed"
                 db.commit()
                 db.refresh(appointment)
 
@@ -411,7 +411,7 @@ class BookingService:
                     db.commit()
                     db.refresh(appointment)
                 else:
-                    appointment.calendar_sync_last_error = "Calendar delete failed"
+                    appointment.calendar_sync_last_error = cal.last_error or "Calendar delete failed"
                     db.commit()
                     db.refresh(appointment)
             else:
