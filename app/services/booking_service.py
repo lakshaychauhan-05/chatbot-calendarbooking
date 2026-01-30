@@ -6,7 +6,6 @@ Google Calendar is updated ONLY after DB transaction succeeds.
 from datetime import date, time, datetime, timedelta
 import logging
 import re
-import threading
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from uuid import UUID
@@ -16,9 +15,11 @@ from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.patient_history import PatientHistory
 from app.models.appointment import Appointment, AppointmentStatus, AppointmentSource
+from app.models.calendar_sync_job import CalendarSyncJob
 from app.schemas.appointment import AppointmentCreate, AppointmentReschedule
 from app.services.availability_service import AvailabilityService
 from app.services.calendar_sync_queue import calendar_sync_queue
+from app.services.google_calendar_service import GoogleCalendarService
 from app.services.rag_sync_service import RAGSyncService
 from app.utils.datetime_utils import to_utc
 
@@ -177,14 +178,10 @@ class BookingService:
             db.commit()
             db.refresh(appointment)
             
-            # Queue calendar sync instead of blocking request
-            calendar_sync_queue.enqueue_create(str(appointment.id))
-            # Trigger immediate sync in background so event appears within ~1-2 seconds
-            threading.Thread(
-                target=calendar_sync_queue.trigger_immediate_sync,
-                args=(str(appointment.id), "CREATE"),
-                daemon=True,
-            ).start()
+            # Queue calendar sync and run immediately so calendar updates before response
+            apt_id_str = str(appointment.id)
+            calendar_sync_queue.enqueue_create(apt_id_str)
+            calendar_sync_queue.trigger_immediate_sync(apt_id_str, "CREATE")
 
             logger.info(f"Successfully booked appointment {appointment.id}")
             return appointment
@@ -286,12 +283,58 @@ class BookingService:
             db.commit()
             db.refresh(appointment)
             
-            # Queue calendar sync instead of blocking request
+            # Queue calendar sync (for worker retry) then sync immediately in same session
+            apt_id_str = str(appointment.id)
+            action = "UPDATE" if old_event_id else "CREATE"
             if old_event_id:
-                calendar_sync_queue.enqueue_update(str(appointment.id))
+                calendar_sync_queue.enqueue_update(apt_id_str)
             else:
-                calendar_sync_queue.enqueue_create(str(appointment.id))
-            
+                calendar_sync_queue.enqueue_create(apt_id_str)
+
+            cal = GoogleCalendarService()
+            if old_event_id:
+                ok = cal.update_event(
+                    doctor_email=appointment.doctor_email,
+                    event_id=old_event_id,
+                    patient_name=patient.name,
+                    appointment_date=appointment.date,
+                    start_time=appointment.start_time,
+                    end_time=appointment.end_time,
+                    description=f"Appointment with {patient.name}",
+                    timezone_name=appointment.timezone,
+                )
+            else:
+                event_id = cal.create_event(
+                    doctor_email=appointment.doctor_email,
+                    patient_name=patient.name,
+                    appointment_date=appointment.date,
+                    start_time=appointment.start_time,
+                    end_time=appointment.end_time,
+                    description=f"Appointment with {patient.name}",
+                    timezone_name=appointment.timezone,
+                )
+                ok = bool(event_id)
+                if ok:
+                    appointment.google_calendar_event_id = event_id
+
+            if ok:
+                appointment.calendar_sync_status = "SYNCED"
+                appointment.calendar_sync_last_error = None
+                appointment.calendar_sync_next_attempt_at = None
+                job = db.query(CalendarSyncJob).filter(
+                    CalendarSyncJob.appointment_id == appointment.id,
+                    CalendarSyncJob.action == action,
+                    CalendarSyncJob.status.in_(["PENDING", "IN_PROGRESS"]),
+                ).first()
+                if job:
+                    job.status = "COMPLETED"
+                db.commit()
+                db.refresh(appointment)
+            else:
+                appointment.calendar_sync_last_error = "Calendar sync failed"
+                db.commit()
+                db.refresh(appointment)
+
             logger.info(f"Successfully rescheduled appointment {appointment_id}")
             return appointment
             
@@ -345,10 +388,34 @@ class BookingService:
                 db.commit()
                 db.refresh(appointment)
             
-            # Queue calendar sync instead of blocking request
+            # Queue calendar sync (for worker retry) then sync immediately in same session
             if event_id:
                 calendar_sync_queue.enqueue_delete(str(appointment.id))
-            
+                cal = GoogleCalendarService()
+                ok = cal.delete_event(doctor_email=appointment.doctor_email, event_id=event_id)
+                if ok:
+                    appointment.calendar_sync_status = "SYNCED"
+                    appointment.calendar_sync_last_error = None
+                    appointment.calendar_sync_next_attempt_at = None
+                    job = db.query(CalendarSyncJob).filter(
+                        CalendarSyncJob.appointment_id == appointment.id,
+                        CalendarSyncJob.action == "DELETE",
+                        CalendarSyncJob.status.in_(["PENDING", "IN_PROGRESS"]),
+                    ).first()
+                    if job:
+                        job.status = "COMPLETED"
+                    db.commit()
+                    db.refresh(appointment)
+                else:
+                    appointment.calendar_sync_last_error = "Calendar delete failed"
+                    db.commit()
+                    db.refresh(appointment)
+            else:
+                # No calendar event to delete
+                appointment.calendar_sync_status = "SYNCED"
+                db.commit()
+                db.refresh(appointment)
+
             logger.info(f"Successfully cancelled appointment {appointment_id}")
             return appointment
             

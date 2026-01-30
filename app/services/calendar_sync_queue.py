@@ -254,20 +254,26 @@ class CalendarSyncQueue:
                         db.commit()
                         return
                     job.last_error = "Calendar event update failed"
+                # fall through to retry logic
 
             if job.action == "DELETE":
+                deleted = False
                 if appointment.google_calendar_event_id:
-                    self._calendar_service.delete_event(
+                    deleted = self._calendar_service.delete_event(
                         doctor_email=appointment.doctor_email,
                         event_id=appointment.google_calendar_event_id
                     )
-                appointment.calendar_sync_status = "SYNCED"
-                appointment.calendar_sync_attempts = job.attempts
-                appointment.calendar_sync_next_attempt_at = None
-                appointment.calendar_sync_last_error = None
-                job.status = "COMPLETED"
-                db.commit()
-                return
+                else:
+                    deleted = True  # No event to delete
+                if deleted:
+                    appointment.calendar_sync_status = "SYNCED"
+                    appointment.calendar_sync_attempts = job.attempts
+                    appointment.calendar_sync_next_attempt_at = None
+                    appointment.calendar_sync_last_error = None
+                    job.status = "COMPLETED"
+                    db.commit()
+                    return
+                job.last_error = "Calendar event delete failed"
 
             # Retry or fail
             job.status = "PENDING"
