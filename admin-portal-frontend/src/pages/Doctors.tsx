@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import api from "../services/api";
+import api, { normalizeDoctorsResponse } from "../services/api";
 import { useToast } from "../contexts/ToastContext";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Modal from "../components/Modal";
@@ -79,10 +79,11 @@ const Doctors = () => {
     setLoading(true);
     setError(null);
     try {
-      const params: { limit: number; clinic_id?: string } = { limit: 500 };
+      const params: { limit: number; clinic_id?: string } = { limit: 200 };
       if (filterClinicId) params.clinic_id = filterClinicId;
       const resp = await api.get("/doctors", { params });
-      setDoctors(resp.data.doctors || resp.data?.doctors || []);
+      const list = normalizeDoctorsResponse(resp.data);
+      setDoctors(list);
     } catch (err: any) {
       const msg = err?.response?.data?.detail || "Failed to load doctors";
       setError(Array.isArray(msg) ? msg[0]?.msg ?? msg : msg);
@@ -368,7 +369,14 @@ const Doctors = () => {
         ) : doctors.length === 0 ? (
           <div className="empty-state">
             <p>No doctors found</p>
-            <span>{filterClinicId || filterClinicIdInput ? "Try changing the filter or create a doctor for this clinic." : "Create your first doctor using the form above."}</span>
+            <span>
+              {filterClinicId || filterClinicIdInput
+                ? "Try changing the filter or create a doctor for this clinic."
+                : "Create your first doctor using the form above."}
+            </span>
+            <span style={{ display: "block", marginTop: 12, fontSize: "0.875rem", color: "var(--text-muted)" }}>
+              If you expect data: ensure Core API (port 8000) and Admin API (port 5050) are running, and SERVICE_API_KEY matches in .env.
+            </span>
           </div>
         ) : (
           <div className="table-wrap">

@@ -1,18 +1,25 @@
 """
 Settings for the admin portal service.
+Loads .env from project root so CORE_API_BASE and SERVICE_API_KEY match the core API.
 """
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 from typing import Optional, List
 
+# Project root = parent of admin_portal package (same .env as run.py / core API)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ROOT_ENV = _PROJECT_ROOT / ".env"
+
 
 class AdminSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ROOT_ENV) if _ROOT_ENV.exists() else ".env",
+        env_file_encoding="utf-8",
         case_sensitive=True,
-        extra="ignore"  # Ignore extra fields from .env
+        extra="ignore",
     )
-    
+
     ADMIN_PORTAL_PORT: int = 5050
     ADMIN_PORTAL_DEBUG: bool = False
     ADMIN_PORTAL_JWT_SECRET: str
@@ -25,10 +32,20 @@ class AdminSettings(BaseSettings):
     ADMIN_PASSWORD_HASH: Optional[str] = None
     ADMIN_PASSWORD: Optional[str] = None  # convenience for local dev; hash preferred
 
-    # Downstream services
+    # Downstream services (must match core API .env)
     CORE_API_BASE: str = "http://localhost:8000"
     PORTAL_API_BASE: str = "http://localhost:5000/portal"
     SERVICE_API_KEY: str  # shared X-API-Key for protected routes
+
+    @field_validator("CORE_API_BASE")
+    @classmethod
+    def strip_core_base_trailing_slash(cls, v: str) -> str:
+        return v.rstrip("/") if v else v
+
+    @field_validator("PORTAL_API_BASE")
+    @classmethod
+    def strip_portal_base_trailing_slash(cls, v: str) -> str:
+        return v.rstrip("/") if v else v
 
     @field_validator("ADMIN_PORTAL_CORS_ORIGINS")
     @classmethod

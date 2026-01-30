@@ -66,7 +66,7 @@ const Clinics = () => {
 
   const fetchDoctors = useCallback(async () => {
     try {
-      const resp = await api.get("/doctors", { params: { limit: 500 } });
+      const resp = await api.get("/doctors", { params: { limit: 200 } });
       const list = resp.data.doctors || resp.data?.doctors || [];
       setDoctors(list);
     } catch {

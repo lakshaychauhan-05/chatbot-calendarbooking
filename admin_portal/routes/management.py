@@ -1,6 +1,7 @@
 """
 Admin-facing management routes that proxy to the core and portal services.
 """
+import logging
 from typing import Any, Dict, Optional
 from uuid import UUID
 import secrets
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from admin_portal.config import admin_settings
 from admin_portal.dependencies import get_current_admin
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(get_current_admin)])
 
@@ -21,8 +23,24 @@ async def _request_core(method: str, path: str, params: Dict[str, Any] | None = 
     url = f"{admin_settings.CORE_API_BASE}{path}"
     headers = {"X-API-Key": admin_settings.SERVICE_API_KEY}
     cleaned_params = {k: v for k, v in (params or {}).items() if v is not None}
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.request(method, url, params=cleaned_params, json=json, headers=headers)
+    logger.info("Core API request: %s %s params=%s", method, url, cleaned_params)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.request(method, url, params=cleaned_params, json=json, headers=headers)
+    except httpx.RequestError as e:
+        logger.error("Core API request failed: %s %s error=%s", method, url, e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Cannot reach core API at {admin_settings.CORE_API_BASE}: {str(e)}. Is the core API running?",
+        )
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        logger.warning("Core API error: %s %s status=%s body=%s", method, url, resp.status_code, body)
+    else:
+        logger.info("Core API success: %s %s status=%s", method, url, resp.status_code)
     return _handle_response(resp)
 
 

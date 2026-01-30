@@ -16,4 +16,12 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+/** Normalize API list response: handles { doctors: [...] } or { data: { doctors: [...] } } */
+export function normalizeDoctorsResponse(data: unknown): { email: string; name: string; clinic_id: string; specialization?: string; is_active?: boolean }[] {
+  if (data == null || typeof data !== "object") return [];
+  const d = data as Record<string, unknown>;
+  const arr = d.doctors ?? (d.data as Record<string, unknown>)?.doctors;
+  return Array.isArray(arr) ? arr : [];
+}
+
 export default api;
