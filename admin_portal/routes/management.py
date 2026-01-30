@@ -25,7 +25,7 @@ async def _request_core(method: str, path: str, params: Dict[str, Any] | None = 
     cleaned_params = {k: v for k, v in (params or {}).items() if v is not None}
     logger.info("Core API request: %s %s params=%s", method, url, cleaned_params)
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             resp = await client.request(method, url, params=cleaned_params, json=json, headers=headers)
     except httpx.RequestError as e:
         logger.error("Core API request failed: %s %s error=%s", method, url, e)
@@ -50,7 +50,7 @@ async def _request_portal(method: str, path: str, json: Dict[str, Any] | None = 
     """
     url = f"{admin_settings.PORTAL_API_BASE}{path}"
     headers = {"X-API-Key": admin_settings.SERVICE_API_KEY}
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         resp = await client.request(method, url, json=json, headers=headers)
     return _handle_response(resp)
 
