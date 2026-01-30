@@ -9,6 +9,7 @@ from app.database import get_db
 from app.security import verify_api_key
 from app.models.doctor import Doctor
 from app.models.doctor_leave import DoctorLeave
+from app.models.clinic import Clinic
 from app.schemas.doctor import (
     DoctorCreate,
     DoctorUpdate,
@@ -153,6 +154,13 @@ async def update_doctor(
     try:
         # Update fields
         update_data = doctor_data.model_dump(exclude_unset=True)
+        if "clinic_id" in update_data:
+            clinic = db.query(Clinic).filter(Clinic.id == update_data["clinic_id"]).first()
+            if not clinic:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Clinic with id '{update_data['clinic_id']}' not found"
+                )
         for field, value in update_data.items():
             setattr(doctor, field, value)
         

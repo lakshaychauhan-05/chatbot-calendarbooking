@@ -21,7 +21,7 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
           <NavLink to="/doctors" className={({ isActive }) => (isActive ? "active" : "")}>
             Doctors
           </NavLink>
-          <button className="secondary" onClick={handleLogout}>
+          <button type="button" className="btn-secondary" onClick={handleLogout}>
             Logout
           </button>
         </div>

@@ -30,6 +30,7 @@ class DoctorCreate(DoctorBase):
 
 class DoctorUpdate(BaseModel):
     """Schema for updating doctor information."""
+    clinic_id: Optional[UUID] = Field(None, description="Reassign doctor to another clinic")
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     specialization: Optional[str] = Field(None, min_length=1, max_length=255)
     experience_years: Optional[int] = Field(None, ge=0)
