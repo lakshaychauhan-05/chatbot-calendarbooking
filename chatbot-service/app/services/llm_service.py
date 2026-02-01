@@ -49,7 +49,7 @@ Available intents:
 - reschedule_appointment: User wants to change an existing appointment
 - cancel_appointment: User wants to cancel an existing appointment
 - get_doctor_info: User wants information about doctors or their specialties
-- check_availability: User wants to check available appointment slots
+- check_availability: User wants to check available appointment slots or timings
 - get_my_appointments: User wants to see their existing appointments
 - general_info: General questions about the clinic, services, etc.
 - unknown: Unable to determine intent
@@ -57,8 +57,11 @@ Available intents:
 Guidelines:
 - Be precise in your classification
 - Look for keywords and context clues
-- Consider the conversation flow
+- Consider the conversation flow and maintain continuity
 - If uncertain, prefer more specific intents over general ones
+- Questions about slot availability ("is last slot upto 11:30 only?", "any other timings?") should be check_availability
+- Clarifying questions about timing/slots are NOT confirmations - they should be check_availability
+- "yes", "no", "confirm" are confirmation/rejection responses - not separate intents
 
 Conversation history (most recent last):
 {history}
@@ -82,17 +85,22 @@ Available entity types:
 - date: Dates (e.g., "tomorrow", "next Monday", "2024-01-15")
 - time: Times (e.g., "2 PM", "14:00", "morning")
 - doctor_name: Doctor names (e.g., "Dr. Smith", "Dr. Sarah Johnson")
-- specialization: Medical specialties (e.g., "cardiology", "dermatology")
-- patient_name: Patient names (if mentioned)
-- phone_number: Phone numbers
+- specialization: Medical specialties (e.g., "cardiology", "dermatology", "skin specialist")
+- patient_name: The patient's actual name (a person's name like "John", "Priya Sharma")
+- phone_number: Phone numbers (10+ digits)
 - email: Email addresses
-- symptoms: Medical symptoms or conditions
+- symptoms: Medical symptoms, conditions, or health issues (e.g., "skin allergy", "headache", "fever", "rash", "pain")
+
+CRITICAL GUIDELINES for distinguishing entities:
+1. patient_name: ONLY extract as patient_name if it is clearly a person's first/last name (e.g., "I'm Rahul", "My name is Priya", "this is John speaking").
+2. symptoms: Extract medical complaints, conditions, or issues as symptoms (e.g., "skin allergy", "rash", "itching", "pain", "fever", "cough").
+3. DO NOT confuse symptoms with patient_name. Phrases like "I have skin allergy" or "facing issue in my skin" contain SYMPTOMS, not patient_name.
+4. specialization: Medical fields like "dermatology", "cardiology", "skin", "heart", "ENT". Do NOT change the specialization mentioned in conversation history unless user explicitly requests a different specialty.
+5. Use history to resolve pronouns like "him/her/that doctor" into a doctor_name when possible.
+6. If user mentions a specialty earlier (e.g., "dermatology" or "skin") and continues the conversation, do NOT change it to a different specialty unless explicitly requested.
 
 Conversation history (most recent last):
 {history}
-
-Guidelines:
-- Use history to resolve pronouns like "him/her/that doctor" into a doctor_name when possible.
 
 User message: {message}
 

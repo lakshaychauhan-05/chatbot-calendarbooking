@@ -126,6 +126,16 @@ class ChatService:
                     requires_confirmation=False,
                     booking_details=None
                 )
+            elif pending_action and self._is_clarifying_question(request.message):
+                # User is asking a clarifying question about the booking, not confirming
+                # Clear pending action and allow them to get more information
+                logger.info("Detected clarifying question during confirmation, allowing user to continue")
+                self.conversation_manager.update_conversation(
+                    conversation_id=conversation_id,
+                    state=ConversationState.GATHERING_INFO,
+                    context={"pending_action": None}
+                )
+                # Continue to intent classification for the question
 
             # Classify intent and extract entities
             intent_classification = await self.llm_service.classify_intent(
@@ -139,20 +149,35 @@ class ChatService:
             )
 
             # Guard: keep user inside booking flow until completed
+            # But allow CHECK_AVAILABILITY if user explicitly asks for slots/timings
             if conversation and conversation.state in [
                 ConversationState.GATHERING_INFO,
                 ConversationState.CONFIRMING_BOOKING,
                 ConversationState.BOOKING_APPOINTMENT
             ]:
+                # Check if user is asking for availability/slots/timings
+                availability_keywords = ["timing", "slot", "available", "availability", "when", "other time", "more time"]
+                is_asking_availability = any(kw in request.message.lower() for kw in availability_keywords)
+
                 if intent_classification.intent not in [
                     IntentType.CANCEL_APPOINTMENT,
-                    IntentType.RESCHEDULE_APPOINTMENT
-                ]:
+                    IntentType.RESCHEDULE_APPOINTMENT,
+                    IntentType.CHECK_AVAILABILITY
+                ] and not is_asking_availability:
                     logger.info(
                         "Forcing booking intent due to active booking state",
                         extra={"conversation_id": conversation_id}
                     )
                     intent_classification.intent = IntentType.BOOK_APPOINTMENT
+                elif is_asking_availability:
+                    # User wants to check other slots, switch to availability intent
+                    intent_classification.intent = IntentType.CHECK_AVAILABILITY
+                    # Reset booking confirmation state
+                    self.conversation_manager.update_conversation(
+                        conversation_id=conversation_id,
+                        state=ConversationState.INITIAL,
+                        context={"pending_action": None}
+                    )
 
             # Auto-transition from availability -> booking when time is provided
             if conversation:
@@ -309,6 +334,24 @@ class ChatService:
             extracted["doctor_name"] = explicit_doctor_name
         elif extracted.get("doctor_name") and not self._mentions_doctor_pronoun(message):
             extracted.pop("doctor_name", None)
+
+        # Validate extracted specialization - only use if explicitly mentioned in message
+        # This prevents LLM from incorrectly changing the specialization mid-conversation
+        if extracted.get("specialization"):
+            existing_spec = booking_context.get("specialization") or context.get("last_specialization") or context.get("availability_specialization")
+            extracted_spec_lower = extracted.get("specialization", "").lower()
+            message_lower = message.lower()
+
+            # Check if the extracted specialization is actually mentioned in the current message
+            spec_mentioned = (
+                extracted_spec_lower in message_lower or
+                self._normalize_specialization(extracted_spec_lower) in message_lower
+            )
+
+            # If existing context has a specialization and new one isn't explicitly in the message, keep existing
+            if existing_spec and not spec_mentioned:
+                logger.info(f"Keeping existing specialization '{existing_spec}' instead of '{extracted.get('specialization')}'")
+                extracted.pop("specialization", None)
 
         booking_context = self._merge_booking_context(booking_context, extracted)
 
@@ -548,11 +591,12 @@ class ChatService:
                 working_days = self._safe_list(doctor.get("working_days"))
                 working_hours = doctor.get("working_hours") or {}
                 display_name = self._format_doctor_name(doctor.get("name"))
+                specialization = doctor.get('specialization', 'specialist')
                 return (
-                    f"{display_name} is a {doctor.get('specialization', 'specialist')} "
-                    f"with {doctor.get('experience_years', 'unknown')} years of experience. "
+                    f"{display_name} specializes in {specialization} "
+                    f"and has {doctor.get('experience_years', 'several')} years of experience. "
                     f"They speak {', '.join(languages) if languages else 'multiple languages'} "
-                    f"and work {', '.join(working_days) if working_days else 'varied days'} "
+                    f"and are available {', '.join(working_days) if working_days else 'on select days'} "
                     f"from {working_hours.get('start', 'N/A')} to {working_hours.get('end', 'N/A')}."
                 )
             else:
@@ -803,7 +847,14 @@ class ChatService:
             elif entity.type == EntityType.TIME:
                 booking_details["time"] = entity.value
             elif entity.type == EntityType.PATIENT_NAME:
-                booking_details["patient_name"] = entity.value
+                # Validate patient_name is not actually a symptom
+                if not self._is_likely_symptom(entity.value):
+                    booking_details["patient_name"] = entity.value
+                else:
+                    # If LLM mistakenly classified a symptom as patient_name, treat as symptom
+                    logger.info(f"Reclassifying '{entity.value}' from patient_name to symptoms")
+                    if "symptoms" not in booking_details:
+                        booking_details["symptoms"] = entity.value
             elif entity.type == EntityType.PHONE_NUMBER:
                 normalized = self._normalize_phone_input(entity.value)
                 if normalized:
@@ -940,20 +991,63 @@ class ChatService:
         return f"{action}:{digest}"
 
     def _normalize_phone_input(self, value: Optional[str]) -> Optional[str]:
-        """Normalize phone input to 10 digits or +91XXXXXXXXXX."""
+        """Normalize phone input to 10 digits or +91XXXXXXXXXX.
+
+        Handles various formats:
+        - Pure 10 digits: 9876543210
+        - With spaces/dashes: 987-654-3210, 987 654 3210
+        - With country code: +919876543210, +91 9876543210, 919876543210
+        - With leading zero: 09876543210
+        """
         if not value:
             return None
+
+        # First, try to find a phone number pattern in the text
+        # Match patterns like +91..., 91..., or 10-digit numbers with optional separators
+        phone_patterns = [
+            r'\+91[\s\-]?(\d{10})',           # +91 followed by 10 digits
+            r'\b91[\s\-]?(\d{10})\b',          # 91 followed by 10 digits
+            r'\+91[\s\-]?(\d[\d\s\-]{8,}\d)',  # +91 with separators
+            r'\b0?(\d{10})\b',                 # 10 digits with optional leading 0
+            r'\b(\d{3}[\s\-]\d{3}[\s\-]\d{4})\b',  # XXX-XXX-XXXX format
+            r'\b(\d{5}[\s\-]\d{5})\b',         # XXXXX-XXXXX format
+        ]
+
+        for pattern in phone_patterns:
+            match = re.search(pattern, value)
+            if match:
+                captured = match.group(1) if match.lastindex else match.group(0)
+                digits = re.sub(r'\D', '', captured)
+                if len(digits) == 10:
+                    # Check if original had +91 prefix
+                    full_match = match.group(0)
+                    if full_match.startswith('+91'):
+                        return f"+91{digits}"
+                    return digits
+
+        # Fallback: extract all digits and check if we have exactly 10 or 12 (with 91)
         cleaned = re.sub(r"[^\d+]", "", value)
         if cleaned.startswith("++"):
             cleaned = cleaned[1:]
         has_plus = cleaned.startswith("+")
         digits = re.sub(r"\D", "", cleaned)
-        if has_plus:
-            if len(digits) == 12 and digits.startswith("91"):
-                return f"+{digits}"
-            return None
+
+        # Handle +91XXXXXXXXXX format
+        if has_plus and len(digits) == 12 and digits.startswith("91"):
+            return f"+{digits}"
+
+        # Handle 91XXXXXXXXXX without plus
+        if len(digits) == 12 and digits.startswith("91"):
+            return f"+{digits}"
+
+        # Handle pure 10-digit number
         if len(digits) == 10:
             return digits
+
+        # Handle 11 digits starting with 0 (leading zero)
+        if len(digits) == 11 and digits.startswith("0"):
+            return digits[1:]
+
         return None
 
     def _extract_booking_details_from_message(
@@ -1011,15 +1105,49 @@ class ChatService:
 
     def _extract_name_from_text(self, message: str) -> Optional[str]:
         """Extract name from text patterns like 'my name is'."""
+        # Common symptom/condition words that should NOT be treated as names
+        symptom_words = {
+            "facing", "having", "suffering", "experiencing", "getting",
+            "allergy", "allergies", "rash", "itching", "pain", "ache",
+            "fever", "cough", "cold", "headache", "stomach", "skin",
+            "issue", "problem", "condition", "sick", "unwell", "ill",
+            "burning", "swelling", "infection", "irritation", "discomfort"
+        }
+
         match = re.search(r"\bmy name is\s+([a-zA-Z][a-zA-Z\s'.-]{1,50})", message, re.IGNORECASE)
         if match:
-            return match.group(1).strip()
+            name = match.group(1).strip()
+            # Validate it's not a symptom word
+            if not any(word in name.lower() for word in symptom_words):
+                return name
+
         match = re.search(r"\bi am\s+([a-zA-Z][a-zA-Z\s'.-]{1,50})", message, re.IGNORECASE)
         if match:
-            if re.search(r"\b(looking for|seeking|searching)\b", message, re.IGNORECASE):
+            potential_name = match.group(1).strip()
+            # Exclude phrases like "i am facing", "i am having", "i am looking for"
+            if re.search(r"\b(looking for|seeking|searching|facing|having|suffering|experiencing|getting)\b", potential_name, re.IGNORECASE):
                 return None
-            return match.group(1).strip()
+            # Exclude if it contains symptom words
+            if any(word in potential_name.lower() for word in symptom_words):
+                return None
+            return potential_name
         return None
+
+    def _is_likely_symptom(self, value: str) -> bool:
+        """Check if a value looks like a symptom rather than a name."""
+        if not value:
+            return False
+
+        symptom_indicators = [
+            "allergy", "allergies", "rash", "itching", "itch", "pain", "ache",
+            "fever", "cough", "cold", "headache", "stomach", "skin", "issue",
+            "problem", "condition", "burning", "swelling", "infection", "irritation",
+            "discomfort", "nausea", "vomiting", "diarrhea", "fatigue", "weakness",
+            "dizziness", "bleeding", "inflammation", "soreness", "cramp", "spasm"
+        ]
+
+        value_lower = value.lower()
+        return any(word in value_lower for word in symptom_indicators)
 
     def _extract_date_from_text(self, message: str) -> Optional[str]:
         """Extract date text using heuristics."""
@@ -1303,6 +1431,28 @@ class ChatService:
         """Check if a message is a negative response."""
         normalized = message.strip().lower()
         return bool(re.search(r"\b(no|n|cancel|stop|not now|don't|do not)\b", normalized))
+
+    def _is_clarifying_question(self, message: str) -> bool:
+        """Check if a message is a clarifying question rather than a confirmation."""
+        normalized = message.strip().lower()
+
+        # Check for question marks or question words
+        is_question = (
+            "?" in message or
+            re.search(r"^\s*(is|are|can|could|what|when|how|which|do|does|will|would)\b", normalized)
+        )
+
+        # Check for availability/slot related questions
+        availability_keywords = [
+            "slot", "timing", "available", "availability", "other time", "more time",
+            "upto", "until", "only", "last slot", "any other", "different time"
+        ]
+        asks_about_availability = any(kw in normalized for kw in availability_keywords)
+
+        # A clarifying question is NOT a simple yes/no and asks about slots or is phrased as a question
+        is_not_confirmation = not self._is_affirmative(message) and not self._is_negative(message)
+
+        return is_not_confirmation and (is_question or asks_about_availability)
 
     def _normalize_specialization(self, value: Optional[str]) -> Optional[str]:
         """Normalize specialization terms (e.g., cardiologist -> cardiology)."""

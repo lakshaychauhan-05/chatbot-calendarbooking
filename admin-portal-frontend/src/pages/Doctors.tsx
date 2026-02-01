@@ -53,6 +53,7 @@ const Doctors = () => {
   const [workingEnd, setWorkingEnd] = useState("17:00");
   const [slotDuration, setSlotDuration] = useState(30);
   const [timezone, setTimezone] = useState("UTC");
+  const [initialPassword, setInitialPassword] = useState("");
   const [creating, setCreating] = useState(false);
 
   const [provisioning, setProvisioning] = useState<string | null>(null);
@@ -116,7 +117,7 @@ const Doctors = () => {
     setError(null);
     setCreating(true);
     try {
-      await api.post("/doctors", {
+      const payload: Record<string, any> = {
         clinic_id: clinicId,
         name,
         email,
@@ -129,8 +130,19 @@ const Doctors = () => {
         working_hours: { start: workingStart, end: workingEnd },
         slot_duration_minutes: Number(slotDuration),
         timezone,
-      });
-      addToast("Doctor created successfully", "success");
+      };
+      // Include initial password if provided
+      if (initialPassword.trim()) {
+        payload.initial_password = initialPassword.trim();
+      }
+      const response = await api.post("/doctors", payload);
+      if (response.data?.portal_account_created) {
+        addToast(`Doctor created with portal login ready! Password: ${initialPassword}`, "success");
+      } else if (response.data?.portal_account_note) {
+        addToast(`Doctor created. ${response.data.portal_account_note}`, "success");
+      } else {
+        addToast("Doctor created successfully", "success");
+      }
       setName("");
       setEmail("");
       setSpecialization("");
@@ -143,6 +155,7 @@ const Doctors = () => {
       setWorkingEnd("17:00");
       setSlotDuration(30);
       setTimezone("UTC");
+      setInitialPassword("");
       fetchDoctors();
     } catch (err: any) {
       const msg = err?.response?.data?.detail || "Failed to create doctor";
@@ -273,6 +286,19 @@ const Doctors = () => {
             <div className="form-group">
               <label htmlFor="doctor-email">Email</label>
               <input id="doctor-email" type="email" placeholder="doctor@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            </div>
+            <div className="form-group">
+              <label htmlFor="doctor-password">Initial Password (for Portal Login)</label>
+              <input
+                id="doctor-password"
+                type="text"
+                placeholder="e.g. Password123"
+                value={initialPassword}
+                onChange={(e) => setInitialPassword(e.target.value)}
+              />
+              <small style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+                Set a password so the doctor can log into the Doctor Portal. Leave empty to set later.
+              </small>
             </div>
             <div className="form-group">
               <label htmlFor="doctor-spec">Specialization</label>

@@ -40,6 +40,15 @@ class AppointmentCreate(BaseModel):
     @field_validator("patient_mobile_number")
     @classmethod
     def normalize_phone(cls, value: str) -> str:
+        """Normalize phone number to 10 digits or +91XXXXXXXXXX format.
+
+        Accepts:
+        - 10 digits: 9876543210
+        - With +91: +919876543210
+        - With 91 (no plus): 919876543210
+        - With leading 0: 09876543210
+        - With separators: 987-654-3210, 987 654 3210
+        """
         if not value:
             return value
         cleaned = re.sub(r"[^\d+]", "", value)
@@ -47,13 +56,24 @@ class AppointmentCreate(BaseModel):
             cleaned = cleaned[1:]
         has_plus = cleaned.startswith("+")
         digits = re.sub(r"\D", "", cleaned)
-        if has_plus:
-            if len(digits) != 12 or not digits.startswith("91"):
-                raise ValueError("patient_mobile_number must be 10 digits, with optional +91 prefix")
+
+        # +91XXXXXXXXXX format (12 digits starting with 91)
+        if has_plus and len(digits) == 12 and digits.startswith("91"):
             return f"+{digits}"
-        if len(digits) != 10:
-            raise ValueError("patient_mobile_number must be 10 digits, with optional +91 prefix")
-        return digits
+
+        # 91XXXXXXXXXX without plus (12 digits starting with 91) - normalize to +91
+        if not has_plus and len(digits) == 12 and digits.startswith("91"):
+            return f"+{digits}"
+
+        # 10-digit number
+        if len(digits) == 10:
+            return digits
+
+        # 11 digits starting with 0 (leading zero) - strip the 0
+        if len(digits) == 11 and digits.startswith("0"):
+            return digits[1:]
+
+        raise ValueError("patient_mobile_number must be 10 digits, with optional +91 prefix")
 
 
 class AppointmentReschedule(BaseModel):

@@ -117,8 +117,31 @@ async def get_doctor(doctor_email: str):
 async def create_doctor(payload: Dict[str, Any]):
     """
     Create doctor through core API (ensures RAG + calendar watch hooks).
+    Also automatically creates a portal login account if initial_password is provided.
     """
-    return await _request_core("POST", "/api/v1/doctors", json=payload)
+    # Extract initial_password before sending to core API (core doesn't need it)
+    initial_password = payload.pop("initial_password", None)
+
+    # Create doctor in core API
+    doctor = await _request_core("POST", "/api/v1/doctors", json=payload)
+
+    # If initial_password provided, create portal account
+    if initial_password and doctor and "email" in doctor:
+        try:
+            portal_payload = {"email": doctor["email"], "password": initial_password}
+            await _request_portal("POST", "/auth/register", json=portal_payload)
+            doctor["portal_account_created"] = True
+            doctor["portal_login_ready"] = True
+        except HTTPException as e:
+            # Account might already exist or other error - don't fail doctor creation
+            if "already exists" in str(e.detail).lower():
+                doctor["portal_account_created"] = False
+                doctor["portal_account_note"] = "Account already exists for this doctor"
+            else:
+                doctor["portal_account_created"] = False
+                doctor["portal_account_error"] = str(e.detail)
+
+    return doctor
 
 
 @router.put("/doctors/{doctor_email}")

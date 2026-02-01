@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
-from doctor_portal.schemas import LoginRequest, RegisterRequest, TokenResponse
+from doctor_portal.schemas import LoginRequest, RegisterRequest, TokenResponse, ChangePasswordRequest, MessageResponse
 from doctor_portal.security import verify_password, create_access_token, get_password_hash
-from doctor_portal.dependencies import get_portal_db
+from doctor_portal.dependencies import get_portal_db, get_current_doctor_account
 from app.models.doctor_account import DoctorAccount
 from app.models.doctor import Doctor
 from doctor_portal.config import portal_settings
@@ -227,3 +227,31 @@ def register(payload: RegisterRequest, db: Session = Depends(get_portal_db)) -> 
         token_type="bearer",
         expires_in_minutes=portal_settings.DOCTOR_PORTAL_ACCESS_TOKEN_EXPIRE_MINUTES,
     )
+
+
+@router.put("/change-password", response_model=MessageResponse)
+def change_password(
+    payload: ChangePasswordRequest,
+    db: Session = Depends(get_portal_db),
+    account=Depends(get_current_doctor_account),
+) -> MessageResponse:
+    """
+    Change doctor portal password.
+    """
+    if not verify_password(payload.current_password, account.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect",
+        )
+
+    if payload.current_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from current password",
+        )
+
+    account.password_hash = get_password_hash(payload.new_password)
+    account.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return MessageResponse(message="Password changed successfully")

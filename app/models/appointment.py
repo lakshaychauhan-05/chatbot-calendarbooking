@@ -16,6 +16,7 @@ class AppointmentStatus(str, enum.Enum):
     BOOKED = "BOOKED"
     CANCELLED = "CANCELLED"
     RESCHEDULED = "RESCHEDULED"
+    COMPLETED = "COMPLETED"
 
 
 class AppointmentSource(str, enum.Enum):

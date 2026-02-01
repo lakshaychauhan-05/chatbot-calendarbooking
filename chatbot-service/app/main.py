@@ -67,8 +67,19 @@ async def root():
 async def startup_event():
     """Application startup event."""
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+
+    # Validate critical configuration
     if not settings.OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY not set - chatbot functionality will be limited")
+        logger.warning("=" * 60)
+        logger.warning("OPENAI_API_KEY is NOT configured!")
+        logger.warning("The chatbot will NOT be able to process messages.")
+        logger.warning("Please set OPENAI_API_KEY in your .env file or environment.")
+        logger.warning("=" * 60)
+    else:
+        logger.info("OpenAI API key configured successfully")
+
+    if not settings.CALENDAR_SERVICE_API_KEY or settings.CALENDAR_SERVICE_API_KEY == "dev-api-key":
+        logger.warning("CALENDAR_SERVICE_API_KEY is using default/dev value - ensure it matches core API")
 
 
 @app.on_event("shutdown")

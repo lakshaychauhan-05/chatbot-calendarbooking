@@ -34,13 +34,23 @@ async def login(payload: AdminLoginRequest) -> TokenResponse:
         )
 
     stored_hash = admin_settings.ADMIN_PASSWORD_HASH
-    if not stored_hash:
+
+    # Fallback: if ADMIN_PASSWORD_HASH is not set but ADMIN_PASSWORD is, use direct comparison
+    # (useful for local development, but hash is preferred for production)
+    if not stored_hash and admin_settings.ADMIN_PASSWORD:
+        # Direct password comparison for development convenience
+        if payload.password != admin_settings.ADMIN_PASSWORD:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    elif not stored_hash:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="ADMIN_PASSWORD_HASH not configured; set a bcrypt hash for the admin user",
+            detail="ADMIN_PASSWORD_HASH (or ADMIN_PASSWORD for dev) not configured",
         )
-
-    if not verify_password(payload.password, stored_hash):
+    elif not verify_password(payload.password, stored_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",

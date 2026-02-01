@@ -2,54 +2,132 @@ import { Box, List, ListItemButton, ListItemIcon, ListItemText, Typography } fro
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import EventNoteIcon from "@mui/icons-material/EventNote";
 import PeopleIcon from "@mui/icons-material/People";
+import SettingsIcon from "@mui/icons-material/Settings";
+import LocalHospitalIcon from "@mui/icons-material/LocalHospital";
 import { NavLink, useLocation } from "react-router-dom";
 
 const navItems = [
-  { to: "/dashboard", label: "Overview", icon: <DashboardIcon fontSize="small" /> },
-  { to: "/appointments", label: "Appointments", icon: <EventNoteIcon fontSize="small" /> },
-  { to: "/patients", label: "Patients", icon: <PeopleIcon fontSize="small" /> },
+  { to: "/dashboard", label: "Overview", icon: <DashboardIcon /> },
+  { to: "/appointments", label: "Appointments", icon: <EventNoteIcon /> },
+  { to: "/patients", label: "Patients", icon: <PeopleIcon /> },
+  { to: "/settings", label: "Settings", icon: <SettingsIcon /> },
 ];
 
 const Sidebar = () => {
   const location = useLocation();
   return (
     <Box
-      width={240}
-      bgcolor="#0f172a"
-      color="white"
-      display="flex"
-      flexDirection="column"
-      borderRight="1px solid #1f2937"
+      width={260}
+      sx={{
+        background: "linear-gradient(180deg, #0f172a 0%, #1e293b 100%)",
+        color: "white",
+        display: "flex",
+        flexDirection: "column",
+        boxShadow: "4px 0 20px rgba(0, 0, 0, 0.15)",
+        position: "relative",
+        "&::after": {
+          content: '""',
+          position: "absolute",
+          top: 0,
+          right: 0,
+          bottom: 0,
+          width: 1,
+          background: "linear-gradient(180deg, rgba(59, 130, 246, 0.3) 0%, transparent 100%)",
+        },
+      }}
     >
-      <Box px={2} py={3} borderBottom="1px solid #1f2937">
-        <Typography variant="h6" fontWeight={700}>
-          Doctor Portal
-        </Typography>
-        <Typography variant="body2" color="#cbd5e1">
-          Schedule & Patients
-        </Typography>
+      {/* Logo Section */}
+      <Box
+        px={3}
+        py={3}
+        display="flex"
+        alignItems="center"
+        gap={2}
+        sx={{
+          borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+        }}
+      >
+        <Box
+          sx={{
+            width: 44,
+            height: 44,
+            borderRadius: 2,
+            background: "linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxShadow: "0 4px 12px rgba(59, 130, 246, 0.3)",
+          }}
+        >
+          <LocalHospitalIcon sx={{ fontSize: 24, color: "white" }} />
+        </Box>
+        <Box>
+          <Typography variant="h6" fontWeight={700} sx={{ lineHeight: 1.2 }}>
+            Doctor Portal
+          </Typography>
+          <Typography variant="caption" sx={{ color: "#94a3b8" }}>
+            Healthcare Management
+          </Typography>
+        </Box>
       </Box>
-      <List sx={{ flex: 1 }}>
+
+      {/* Navigation */}
+      <List sx={{ flex: 1, py: 2, px: 1.5 }}>
         {navItems.map((item) => {
-          const active = location.pathname.startsWith(item.to);
+          const active = location.pathname === item.to ||
+            (item.to !== "/dashboard" && location.pathname.startsWith(item.to));
           return (
             <ListItemButton
               key={item.to}
               component={NavLink}
               to={item.to}
-              selected={active}
               sx={{
-                color: active ? "#fff" : "#cbd5e1",
-                "&.Mui-selected": { bgcolor: "#1f2937" },
-                "&:hover": { bgcolor: "#1f2937" },
+                borderRadius: 2,
+                mb: 0.5,
+                py: 1.2,
+                px: 2,
+                color: active ? "#ffffff" : "#94a3b8",
+                background: active
+                  ? "linear-gradient(90deg, rgba(59, 130, 246, 0.2) 0%, rgba(59, 130, 246, 0.05) 100%)"
+                  : "transparent",
+                borderLeft: active ? "3px solid #3b82f6" : "3px solid transparent",
+                transition: "all 0.2s ease",
+                "&:hover": {
+                  bgcolor: "rgba(59, 130, 246, 0.1)",
+                  color: "#ffffff",
+                  "& .MuiListItemIcon-root": {
+                    color: "#3b82f6",
+                  },
+                },
               }}
             >
-              <ListItemIcon sx={{ color: active ? "#22d3ee" : "#cbd5e1" }}>{item.icon}</ListItemIcon>
-              <ListItemText primary={item.label} />
+              <ListItemIcon
+                sx={{
+                  color: active ? "#3b82f6" : "#64748b",
+                  minWidth: 40,
+                  transition: "color 0.2s ease",
+                }}
+              >
+                {item.icon}
+              </ListItemIcon>
+              <ListItemText
+                primary={item.label}
+                primaryTypographyProps={{
+                  fontWeight: active ? 600 : 500,
+                  fontSize: "0.95rem",
+                }}
+              />
             </ListItemButton>
           );
         })}
       </List>
+
+      {/* Footer */}
+      <Box px={3} py={2} sx={{ borderTop: "1px solid rgba(255, 255, 255, 0.08)" }}>
+        <Typography variant="caption" sx={{ color: "#64748b" }}>
+          Calendar Booking System
+        </Typography>
+      </Box>
     </Box>
   );
 };

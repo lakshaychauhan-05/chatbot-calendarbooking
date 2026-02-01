@@ -23,6 +23,7 @@ from app.config import settings
 from app.services.booking_service import BookingService
 from app.services.idempotency_service import IdempotencyService
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,10 @@ router = APIRouter()
 availability_service = AvailabilityService()
 booking_service = BookingService()
 idempotency_service = IdempotencyService()
+
+# Thread-safe cache for doctor export
 _doctor_export_cache = {"timestamp": None, "clinic_id": None, "data": None}
+_doctor_export_cache_lock = threading.Lock()
 
 
 @router.get("/availability/{doctor_email}", response_model=AvailabilityResponse)
@@ -559,19 +563,27 @@ async def export_doctors_data(
     """
     Export doctor data for chatbot consumption.
     Returns enriched JSON data about doctors for LLM context.
+    Thread-safe caching with configurable TTL.
     """
     try:
         now = datetime.now(timezone.utc)
-        cache_ts = _doctor_export_cache.get("timestamp")
-        cache_clinic = _doctor_export_cache.get("clinic_id")
-        if (
-            cache_ts
-            and (now - cache_ts).total_seconds() <= settings.DOCTOR_EXPORT_CACHE_TTL_SECONDS
-            and cache_clinic == (str(clinic_id) if clinic_id else None)
-            and _doctor_export_cache.get("data")
-        ):
-            return _doctor_export_cache["data"]
+        clinic_key = str(clinic_id) if clinic_id else None
 
+        # Thread-safe cache check
+        with _doctor_export_cache_lock:
+            cache_ts = _doctor_export_cache.get("timestamp")
+            cache_clinic = _doctor_export_cache.get("clinic_id")
+            cached_data = _doctor_export_cache.get("data")
+
+            if (
+                cache_ts
+                and (now - cache_ts).total_seconds() <= settings.DOCTOR_EXPORT_CACHE_TTL_SECONDS
+                and cache_clinic == clinic_key
+                and cached_data
+            ):
+                return cached_data
+
+        # Fetch from database (outside lock to avoid blocking)
         query = db.query(Doctor).filter(Doctor.is_active == True)
 
         if clinic_id:
@@ -603,9 +615,12 @@ async def export_doctors_data(
             "export_timestamp": now.isoformat(),
             "total_doctors": len(doctors_data)
         }
-        _doctor_export_cache["timestamp"] = now
-        _doctor_export_cache["clinic_id"] = str(clinic_id) if clinic_id else None
-        _doctor_export_cache["data"] = response_payload
+
+        # Thread-safe cache update
+        with _doctor_export_cache_lock:
+            _doctor_export_cache["timestamp"] = now
+            _doctor_export_cache["clinic_id"] = clinic_key
+            _doctor_export_cache["data"] = response_payload
 
         return response_payload
 

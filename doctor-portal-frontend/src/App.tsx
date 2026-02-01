@@ -5,6 +5,7 @@ import Dashboard from "./pages/Dashboard";
 import Appointments from "./pages/Appointments";
 import Patients from "./pages/Patients";
 import PatientDetail from "./pages/PatientDetail";
+import Settings from "./pages/Settings";
 import OAuthCallback from "./pages/OAuthCallback";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { CircularProgress, Box } from "@mui/material";
@@ -75,6 +76,16 @@ const AppRoutes = () => (
         <ProtectedRoute>
           <Layout>
             <PatientDetail />
+          </Layout>
+        </ProtectedRoute>
+      }
+    />
+    <Route
+      path="/settings"
+      element={
+        <ProtectedRoute>
+          <Layout>
+            <Settings />
           </Layout>
         </ProtectedRoute>
       }

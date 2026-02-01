@@ -9,11 +9,21 @@ import logging
 from app.models.chat import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
 from app.services.conversation_manager import ConversationManager
+from app.core.config import settings
 
 router = APIRouter()
 chat_service = ChatService()
 conversation_manager = ConversationManager()
 logger = logging.getLogger(__name__)
+
+
+def _check_openai_configured():
+    """Check if OpenAI API is configured and raise clear error if not."""
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Chatbot service is not properly configured. OPENAI_API_KEY is missing. Please contact the administrator."
+        )
 
 # Store active WebSocket connections
 active_connections: Dict[str, WebSocket] = {}
@@ -27,6 +37,9 @@ async def chat_message(request: ChatRequest):
     This endpoint processes user messages, classifies intent,
     manages conversation state, and generates appropriate responses.
     """
+    # Validate OpenAI configuration before processing
+    _check_openai_configured()
+
     try:
         response = await chat_service.process_message(request)
         return response
@@ -122,6 +135,16 @@ async def websocket_chat(websocket: WebSocket, conversation_id: str):
     Allows for real-time bidirectional communication with the chatbot.
     """
     await websocket.accept()
+
+    # Check OpenAI configuration early
+    if not settings.OPENAI_API_KEY:
+        await websocket.send_json({
+            "error": "Chatbot service is not properly configured. OPENAI_API_KEY is missing.",
+            "conversation_id": conversation_id
+        })
+        await websocket.close(code=1011, reason="Service misconfigured")
+        return
+
     active_connections[conversation_id] = websocket
 
     try:
