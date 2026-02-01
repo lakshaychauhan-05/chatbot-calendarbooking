@@ -7,9 +7,10 @@ interface ChatWindowProps {
   messages: Message[];
   isTyping: boolean;
   messagesEndRef: React.RefObject<HTMLDivElement>;
+  onQuickAction?: (action: string) => void;
 }
 
-const ChatWindow: React.FC<ChatWindowProps> = ({ messages, isTyping, messagesEndRef }) => {
+const ChatWindow: React.FC<ChatWindowProps> = ({ messages, isTyping, messagesEndRef, onQuickAction }) => {
   // Welcome screen quick actions
   const quickActions = [
     { icon: CalendarDaysIcon, label: 'Book Appointment', color: 'from-cyan-500 to-cyan-600' },
@@ -48,11 +49,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ messages, isTyping, messagesEnd
               <button
                 key={index}
                 className="w-full flex items-center gap-4 p-4 bg-white rounded-xl border border-slate-200 hover:border-slate-300 hover:shadow-md transition-all duration-200 group text-left"
-                onClick={() => {
-                  // This will be handled by parent, but we need to trigger the action
-                  const event = new CustomEvent('quickAction', { detail: action.label.toLowerCase() });
-                  window.dispatchEvent(event);
-                }}
+                onClick={() => onQuickAction?.(action.label)}
               >
                 <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${action.color} flex items-center justify-center group-hover:scale-110 transition-transform duration-200`}>
                   <action.icon className="w-5 h-5 text-white" />

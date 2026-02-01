@@ -163,6 +163,7 @@ const Chatbot: React.FC = () => {
             messages={messages}
             isTyping={isTyping}
             messagesEndRef={messagesEndRef}
+            onQuickAction={handleSendMessage}
           />
         </div>
 
