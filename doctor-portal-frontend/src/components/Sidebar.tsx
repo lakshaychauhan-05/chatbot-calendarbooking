@@ -6,7 +6,13 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import LocalHospitalIcon from "@mui/icons-material/LocalHospital";
 import { useLocation, useNavigate } from "react-router-dom";
 
-const navItems = [
+interface NavItem {
+  to: string;
+  label: string;
+  icon: React.ReactNode;
+}
+
+const navItems: NavItem[] = [
   { to: "/dashboard", label: "Overview", icon: <DashboardIcon /> },
   { to: "/appointments", label: "Appointments", icon: <EventNoteIcon /> },
   { to: "/patients", label: "Patients", icon: <PeopleIcon /> },
@@ -18,43 +24,47 @@ const Sidebar = () => {
   const navigate = useNavigate();
 
   const handleNavigation = (path: string) => {
+    console.log("Navigating to:", path); // Debug log
     navigate(path);
+  };
+
+  const isActive = (path: string): boolean => {
+    if (path === "/dashboard") {
+      return location.pathname === "/" || location.pathname === "/dashboard";
+    }
+    return location.pathname.startsWith(path);
   };
 
   return (
     <Box
-      width={260}
+      component="nav"
       sx={{
+        width: 260,
+        flexShrink: 0,
         background: "linear-gradient(180deg, #0f172a 0%, #1e293b 100%)",
         color: "white",
         display: "flex",
         flexDirection: "column",
         boxShadow: "4px 0 20px rgba(0, 0, 0, 0.15)",
-        position: "relative",
         minHeight: "100vh",
-        "&::after": {
-          content: '""',
-          position: "absolute",
-          top: 0,
-          right: 0,
-          bottom: 0,
-          width: 1,
-          background: "linear-gradient(180deg, rgba(59, 130, 246, 0.3) 0%, transparent 100%)",
-        },
+        borderRight: "1px solid rgba(59, 130, 246, 0.2)",
       }}
     >
       {/* Logo Section */}
       <Box
-        px={3}
-        py={3}
-        display="flex"
-        alignItems="center"
-        gap={2}
+        onClick={() => handleNavigation("/dashboard")}
         sx={{
+          px: 3,
+          py: 3,
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
           borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
           cursor: "pointer",
+          "&:hover": {
+            bgcolor: "rgba(59, 130, 246, 0.1)",
+          },
         }}
-        onClick={() => handleNavigation("/dashboard")}
       >
         <Box
           sx={{
@@ -81,30 +91,31 @@ const Sidebar = () => {
       </Box>
 
       {/* Navigation */}
-      <List sx={{ flex: 1, py: 2, px: 1.5 }}>
+      <List component="div" sx={{ flex: 1, py: 2, px: 1.5 }}>
         {navItems.map((item) => {
-          const active = location.pathname === item.to ||
-            (item.to !== "/dashboard" && location.pathname.startsWith(item.to));
+          const active = isActive(item.to);
           return (
             <ListItemButton
               key={item.to}
               onClick={() => handleNavigation(item.to)}
+              selected={active}
               sx={{
                 borderRadius: 2,
                 mb: 0.5,
                 py: 1.2,
                 px: 2,
                 color: active ? "#ffffff" : "#94a3b8",
-                background: active
-                  ? "linear-gradient(90deg, rgba(59, 130, 246, 0.2) 0%, rgba(59, 130, 246, 0.05) 100%)"
-                  : "transparent",
+                bgcolor: active ? "rgba(59, 130, 246, 0.15)" : "transparent",
                 borderLeft: active ? "3px solid #3b82f6" : "3px solid transparent",
                 transition: "all 0.2s ease",
                 "&:hover": {
                   bgcolor: "rgba(59, 130, 246, 0.1)",
                   color: "#ffffff",
-                  "& .MuiListItemIcon-root": {
-                    color: "#3b82f6",
+                },
+                "&.Mui-selected": {
+                  bgcolor: "rgba(59, 130, 246, 0.15)",
+                  "&:hover": {
+                    bgcolor: "rgba(59, 130, 246, 0.2)",
                   },
                 },
               }}
@@ -113,7 +124,6 @@ const Sidebar = () => {
                 sx={{
                   color: active ? "#3b82f6" : "#64748b",
                   minWidth: 40,
-                  transition: "color 0.2s ease",
                 }}
               >
                 {item.icon}
@@ -131,7 +141,7 @@ const Sidebar = () => {
       </List>
 
       {/* Footer */}
-      <Box px={3} py={2} sx={{ borderTop: "1px solid rgba(255, 255, 255, 0.08)" }}>
+      <Box sx={{ px: 3, py: 2, borderTop: "1px solid rgba(255, 255, 255, 0.08)" }}>
         <Typography variant="caption" sx={{ color: "#64748b" }}>
           Calendar Booking System
         </Typography>
