@@ -7,7 +7,7 @@ import traceback
 import json
 import hashlib
 from difflib import get_close_matches
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, date, timedelta, time as dt_time
 from dateutil import parser as date_parser
 
@@ -1389,34 +1389,51 @@ class ChatService:
         doctor_email_to_check = booking_context.get("doctor_email")
         date_to_check = self._parse_date(booking_context.get("date"))
         time_to_check = self._parse_time(booking_context.get("time"))
-        
+
+        # Get doctor info for working hours validation
+        doctor_info = None
+        if doctor_email_to_check:
+            doctor_info = self._find_doctor_by_email(doctor_email_to_check, doctor_data)
+
+        # Validate working hours BEFORE proceeding
+        if time_to_check and doctor_info:
+            is_within_hours, work_start, work_end = self._is_within_working_hours(time_to_check, doctor_info)
+            if not is_within_hours:
+                time_display = self._format_time_display(time_to_check)
+                return (
+                    f"I'm sorry, {self._format_doctor_name(booking_context.get('doctor_name'))} is not available at "
+                    f"{time_display}. The doctor's working hours are {work_start} to {work_end}. "
+                    f"Please choose a time within these hours."
+                )
+
         if doctor_email_to_check and date_to_check and time_to_check:
             try:
                 async with CalendarClient() as calendar_client:
                     availability = await calendar_client.get_doctor_availability(doctor_email_to_check, date_to_check)
                     available_slots = availability.get("available_slots", [])
-                    
+
                     # Check if requested time is in available slots
                     requested_time_str = time_to_check.strftime("%H:%M")
                     # Also try with seconds for comparison
                     requested_time_full = time_to_check.strftime("%H:%M:%S")
-                    
+
                     # Log for debugging
                     logger.info(f"Checking availability: requested={requested_time_full}, available_slots={[s.get('start_time') for s in available_slots[:3]]}")
-                    
+
                     is_available = any(
                         slot.get("start_time") in [requested_time_str, requested_time_full] or
                         slot.get("start_time", "").startswith(requested_time_str)
                         for slot in available_slots
                     )
-                    
+
                     logger.info(f"Availability check result: {is_available}")
-                    
+
                     if not is_available and available_slots:
                         slots_text = ", ".join([slot.get("start_time", "") for slot in available_slots[:5]])
+                        time_display = self._format_time_display(time_to_check)
                         return (
                             f"I'm sorry, {self._format_doctor_name(booking_context.get('doctor_name'))} is not available at "
-                            f"{booking_context.get('time')} on {booking_context.get('date')}. "
+                            f"{time_display} on {booking_context.get('date')}. "
                             f"Available times: {slots_text}. Which time would you prefer?"
                         )
                     elif not available_slots:
@@ -1439,11 +1456,13 @@ class ChatService:
         specialization = booking_context.get('specialization', 'specialist')
         patient_name = self._format_patient_name(booking_context.get('patient_name'))
         date_display = self._format_date_display(booking_context.get('date'))
+        # Show parsed time in 12-hour format for clarity
+        time_display = self._format_time_display(time_to_check) if time_to_check else booking_context.get('time')
 
         return (
             f"Please confirm your appointment details:\n\n"
             f"  Date: {date_display}\n"
-            f"  Time: {booking_context.get('time')}\n"
+            f"  Time: {time_display}\n"
             f"  Doctor: {doctor_display} ({specialization})\n"
             f"  Patient: {patient_name}\n"
             f"  Phone: {booking_context.get('patient_phone')}\n\n"
@@ -2115,6 +2134,39 @@ class ChatService:
             return date_parser.parse(value, fuzzy=True).time()
         except Exception:
             return None
+
+    def _is_within_working_hours(
+        self,
+        requested_time: dt_time,
+        doctor_data: Dict[str, Any]
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Check if requested time is within doctor's working hours.
+
+        Returns:
+            Tuple of (is_valid, working_start, working_end)
+        """
+        working_hours = doctor_data.get("working_hours", {})
+        if not working_hours:
+            return True, None, None  # No working hours defined, assume valid
+
+        start_str = working_hours.get("start", "09:00")
+        end_str = working_hours.get("end", "17:00")
+
+        try:
+            working_start = datetime.strptime(start_str, "%H:%M").time()
+            working_end = datetime.strptime(end_str, "%H:%M").time()
+
+            is_valid = working_start <= requested_time < working_end
+            return is_valid, start_str, end_str
+        except Exception:
+            return True, None, None  # On error, assume valid
+
+    def _format_time_display(self, time_obj: Optional[dt_time]) -> str:
+        """Format time object for display (12-hour format)."""
+        if not time_obj:
+            return "N/A"
+        return time_obj.strftime("%I:%M %p").lstrip("0")  # e.g., "3:00 PM"
 
     def _resolve_doctor_email(
         self,

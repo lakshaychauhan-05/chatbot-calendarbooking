@@ -32,7 +32,7 @@ class Doctor(Base):
     working_days = Column(JSON, nullable=False)  # e.g., ["monday", "tuesday", "wednesday"]
     working_hours = Column(JSON, nullable=False)  # e.g., {"start": "09:00", "end": "17:00"}
     slot_duration_minutes = Column(Integer, nullable=False, default=30)
-    timezone = Column(String(64), nullable=False, default="UTC")
+    timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
     is_active = Column(Boolean, default=True, nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)

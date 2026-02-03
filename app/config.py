@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     CALENDAR_RECONCILE_REQUIRE_ACTIVE_WATCH: bool = True
 
     # Timezone
-    DEFAULT_TIMEZONE: str = "UTC"
+    DEFAULT_TIMEZONE: str = "Asia/Kolkata"
 
     @field_validator("DATABASE_URL")
     @classmethod
