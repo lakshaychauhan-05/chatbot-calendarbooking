@@ -161,17 +161,58 @@ class ChatService:
             )
 
             # Guard: keep user inside booking flow until completed
-            # But allow CHECK_AVAILABILITY if user explicitly asks for slots/timings
+            # But allow breaking out for certain queries
             if conversation and conversation.state in [
                 ConversationState.GATHERING_INFO,
                 ConversationState.CONFIRMING_BOOKING,
                 ConversationState.BOOKING_APPOINTMENT
             ]:
+                message_lower = request.message.lower()
+
+                # Check if user wants to break out of booking flow
+                break_out_phrases = [
+                    "tell me about", "about clinic", "about your clinic", "clinic info",
+                    "doctor info", "who are", "list doctor", "which doctor", "all doctor",
+                    "specialization", "what specialt", "help", "start over", "cancel booking",
+                    "never mind", "forget it", "different doctor"
+                ]
+                wants_to_break_out = any(phrase in message_lower for phrase in break_out_phrases)
+
                 # Check if user is asking for availability/slots/timings
                 availability_keywords = ["timing", "slot", "available", "availability", "when", "other time", "more time"]
-                is_asking_availability = any(kw in request.message.lower() for kw in availability_keywords)
+                is_asking_availability = any(kw in message_lower for kw in availability_keywords)
 
-                if intent_classification.intent not in [
+                # Check if user explicitly mentions a DIFFERENT doctor than current context
+                explicit_new_doctor = self._match_doctor_name_in_message(request.message, await self._get_doctor_data())
+                current_doctor = conversation.context.get("doctor_name") or conversation.context.get("last_doctor_name")
+                is_changing_doctor = (
+                    explicit_new_doctor and current_doctor and
+                    not self._names_match(explicit_new_doctor, current_doctor)
+                )
+
+                if wants_to_break_out:
+                    # User wants general info, break out of booking flow
+                    logger.info("User wants to break out of booking flow")
+                    self.conversation_manager.update_conversation(
+                        conversation_id=conversation_id,
+                        state=ConversationState.INITIAL,
+                        context={"pending_action": None}
+                    )
+                    intent_classification.intent = IntentType.GET_DOCTOR_INFO
+                elif is_changing_doctor:
+                    # User explicitly wants a different doctor - clear old context and continue booking
+                    logger.info(f"User changing doctor from '{current_doctor}' to '{explicit_new_doctor}'")
+                    self.conversation_manager.update_conversation(
+                        conversation_id=conversation_id,
+                        context={
+                            "doctor_name": explicit_new_doctor,
+                            "last_doctor_name": explicit_new_doctor,
+                            "doctor_email": None,
+                            "last_doctor_email": None,
+                            "selected_doctor_email": None
+                        }
+                    )
+                elif intent_classification.intent not in [
                     IntentType.CANCEL_APPOINTMENT,
                     IntentType.RESCHEDULE_APPOINTMENT,
                     IntentType.CHECK_AVAILABILITY
@@ -312,7 +353,7 @@ class ChatService:
             return await self._handle_availability_intent(message, intent, doctor_data, conversation_id)
 
         elif intent.intent == IntentType.GET_MY_APPOINTMENTS:
-            return await self._handle_my_appointments_intent(conversation_id)
+            return await self._handle_my_appointments_intent(conversation_id, message, doctor_data)
 
         else:
             # Use LLM to generate a general response
@@ -399,6 +440,15 @@ class ChatService:
         ):
             booking_context.pop("doctor_email", None)
             booking_context.pop("selected_doctor_email", None)
+            # Also clear context to prevent old doctor from being pulled back
+            self.conversation_manager.update_conversation(
+                conversation_id=conversation_id,
+                context={
+                    "last_doctor_name": booking_context.get("doctor_name"),
+                    "last_doctor_email": None
+                }
+            )
+            logger.info(f"Doctor changed from '{previous_doctor_name}' to '{booking_context.get('doctor_name')}' - clearing old context")
 
         # Ensure selected email still matches chosen doctor name
         if booking_context.get("selected_doctor_email") and booking_context.get("doctor_name"):
@@ -779,7 +829,8 @@ class ChatService:
             specialization = context.get("availability_specialization") or context.get("last_specialization")
 
         if not requested_date:
-            requested_date = message
+            # Try to extract date from message more intelligently
+            requested_date = self._extract_date_from_message(message)
 
         date_obj = self._parse_date(requested_date)
         update_context = {}
@@ -902,8 +953,9 @@ class ChatService:
                     }
                 )
 
-                slots_text = self._format_slots(slots)
-                return f"{self._format_doctor_name(doctor_name)} has availability on {date_obj.isoformat()}: {slots_text}"
+                slots_text = self._format_slots(slots, target_date=date_obj)
+                date_display = self._format_date_display(date_obj.isoformat())
+                return f"{self._format_doctor_name(doctor_name)} is available on {date_display}:\n{slots_text}"
 
             if specialization:
                 normalized_specialization = self._normalize_specialization(specialization)
@@ -939,15 +991,16 @@ class ChatService:
                 )
 
                 summaries = []
+                date_display = self._format_date_display(date_obj.isoformat())
                 for doctor in available_doctors[:3]:
-                    slots_text = self._format_slots(doctor.get("available_slots", []))
-                    summaries.append(f"{self._format_doctor_name(doctor.get('name'))}: {slots_text}")
+                    slots_text = self._format_slots(doctor.get("available_slots", []), target_date=date_obj)
+                    summaries.append(f"\n\n👨‍⚕️ {self._format_doctor_name(doctor.get('name'))}:\n{slots_text}")
 
-                return f"Available {specialization} doctors on {date_obj.isoformat()}: " + " | ".join(summaries)
+                return f"Available {specialization} doctors on {date_display}:" + "".join(summaries)
 
         return "Please tell me which doctor or specialty you'd like and the date you're looking for."
 
-    async def _handle_my_appointments_intent(self, conversation_id: str) -> str:
+    async def _handle_my_appointments_intent(self, conversation_id: str, message: str = "", doctor_data: List[Dict[str, Any]] = None) -> str:
         """Handle requests for user's appointments."""
         conversation = self.conversation_manager.get_conversation(conversation_id)
         context = conversation.context if conversation else {}
@@ -970,6 +1023,11 @@ class ChatService:
             context={"patient_phone": phone}
         )
 
+        # Check if user wants appointments with a specific doctor
+        filter_doctor_name = None
+        if doctor_data and message:
+            filter_doctor_name = self._match_doctor_name_in_message(message, doctor_data)
+
         try:
             async with CalendarClient() as calendar_client:
                 patient = await calendar_client.get_patient_by_mobile(phone)
@@ -984,14 +1042,33 @@ class ChatService:
                 if not appointments:
                     return "I couldn't find any appointments for that phone number."
 
+                # Filter by doctor name if specified
+                if filter_doctor_name:
+                    appointments = [
+                        appt for appt in appointments
+                        if self._names_match(appt.get("doctor_name", ""), filter_doctor_name)
+                    ]
+                    if not appointments:
+                        return f"You don't have any appointments with {self._format_doctor_name(filter_doctor_name)}."
+
                 summaries = []
-                for appt in appointments[:5]:
+                for appt in appointments[:10]:
+                    doctor_name = appt.get("doctor_name", "Unknown Doctor")
+                    appt_date = self._format_date_display(appt.get("date"))
+                    appt_time = self._format_slot_time(appt.get("start_time", ""))
+                    status = appt.get("status", "").capitalize()
                     summaries.append(
-                        f"{appt.get('id')} on {appt.get('date')} at {appt.get('start_time')}"
+                        f"• {self._format_doctor_name(doctor_name)} - {appt_date} at {appt_time} ({status})\n  ID: {appt.get('id')}"
                     )
 
-                return "Here are your recent appointment IDs: " + "; ".join(summaries)
-        except Exception:
+                header = "Here are your appointments"
+                if filter_doctor_name:
+                    header += f" with {self._format_doctor_name(filter_doctor_name)}"
+                header += ":\n\n"
+
+                return header + "\n".join(summaries)
+        except Exception as e:
+            logger.error(f"Error fetching appointments: {e}")
             return "I couldn't fetch your appointments right now. Please try again."
 
     def _extract_booking_details_from_entities(self, entities: List[Any]) -> Dict[str, Any]:
@@ -1472,9 +1549,12 @@ class ChatService:
             is_within_hours, work_start, work_end = self._is_within_working_hours(time_to_check, doctor_info)
             if not is_within_hours:
                 time_display = self._format_time_display(time_to_check)
+                # Format working hours nicely
+                work_start_formatted = self._format_slot_time(work_start) if work_start else "N/A"
+                work_end_formatted = self._format_slot_time(work_end) if work_end else "N/A"
                 return (
                     f"I'm sorry, {self._format_doctor_name(booking_context.get('doctor_name'))} is not available at "
-                    f"{time_display}. The doctor's working hours are {work_start} to {work_end}. "
+                    f"{time_display}. The doctor's working hours are {work_start_formatted} to {work_end_formatted}. "
                     f"Please choose a time within these hours."
                 )
 
@@ -1501,14 +1581,14 @@ class ChatService:
                     logger.info(f"Availability check result: {is_available}")
 
                     if not is_available and available_slots:
-                        # Format available times nicely (12-hour format without seconds)
-                        formatted_slots = [self._format_slot_time(slot.get("start_time", "")) for slot in available_slots[:5]]
-                        slots_text = ", ".join([s for s in formatted_slots if s])
+                        # Format available times nicely (12-hour format, grouped by time of day)
                         time_display = self._format_time_display(time_to_check)
+                        date_display = self._format_date_display(booking_context.get('date'))
+                        slots_text = self._format_slots(available_slots, target_date=date_to_check)
                         return (
                             f"I'm sorry, {self._format_doctor_name(booking_context.get('doctor_name'))} is not available at "
-                            f"{time_display} on {booking_context.get('date')}. "
-                            f"Available times: {slots_text}. Which time would you prefer?"
+                            f"{time_display} on {date_display}.\n\n"
+                            f"Available slots:\n{slots_text}\n\nWhich time would you prefer?"
                         )
                     elif not available_slots:
                         return (
@@ -1885,7 +1965,25 @@ class ChatService:
     def _is_affirmative(self, message: str) -> bool:
         """Check if a message is an affirmative response."""
         normalized = message.strip().lower()
-        return bool(re.search(r"\b(yes|y|yep|yeah|sure|confirm|ok|okay|please do)\b", normalized))
+
+        # Direct affirmative words
+        if re.search(r"\b(yes|y|yep|yeah|yup|ya|yah|sure|confirm|ok|okay|please do|go ahead|proceed|do it|book it|done|fine|alright|absolutely|definitely)\b", normalized):
+            return True
+
+        # Phrases that indicate confirmation
+        affirmative_phrases = [
+            "book now", "ok book", "please book", "go ahead", "let's do it",
+            "sounds good", "that works", "perfect", "great", "do it"
+        ]
+        for phrase in affirmative_phrases:
+            if phrase in normalized:
+                return True
+
+        # Handle typos like "yop" for "yup"
+        if re.search(r"\b(yop|yos|yas|yse)\b", normalized):
+            return True
+
+        return False
 
     def _is_negative(self, message: str) -> bool:
         """Check if a message is a negative response."""
@@ -1991,22 +2089,92 @@ class ChatService:
             "ent": "otolaryngology"
         }
 
+    def _symptom_to_specialization(self) -> Dict[str, str]:
+        """Map common symptoms to appropriate specialization."""
+        return {
+            # Dermatology symptoms
+            "rash": "dermatology",
+            "skin": "dermatology",
+            "acne": "dermatology",
+            "pimple": "dermatology",
+            "itching": "dermatology",
+            "itch": "dermatology",
+            "allergy": "dermatology",
+            "eczema": "dermatology",
+            "psoriasis": "dermatology",
+            "hair loss": "dermatology",
+            "dandruff": "dermatology",
+
+            # Cardiology symptoms
+            "heart": "cardiology",
+            "chest pain": "cardiology",
+            "palpitation": "cardiology",
+            "blood pressure": "cardiology",
+            "bp": "cardiology",
+            "hypertension": "cardiology",
+
+            # Orthopedics symptoms
+            "bone": "orthopedics",
+            "joint": "orthopedics",
+            "knee": "orthopedics",
+            "back pain": "orthopedics",
+            "spine": "orthopedics",
+            "fracture": "orthopedics",
+            "arthritis": "orthopedics",
+            "muscle pain": "orthopedics",
+
+            # Gynecology symptoms
+            "pregnancy": "gynecology",
+            "menstrual": "gynecology",
+            "period": "gynecology",
+            "women health": "gynecology",
+            "ovary": "gynecology",
+            "uterus": "gynecology",
+
+            # Pediatrics symptoms
+            "child": "pediatrics",
+            "baby": "pediatrics",
+            "infant": "pediatrics",
+            "kid": "pediatrics",
+            "vaccination": "pediatrics",
+
+            # General medicine symptoms
+            "fever": "general medicine",
+            "cold": "general medicine",
+            "cough": "general medicine",
+            "flu": "general medicine",
+            "headache": "general medicine",
+            "fatigue": "general medicine",
+            "weakness": "general medicine",
+            "diabetes": "general medicine",
+            "thyroid": "general medicine",
+        }
+
     def _guess_specialization_from_text(
         self,
         message: str,
         doctor_data: List[Dict[str, Any]]
     ) -> Optional[str]:
-        """Infer specialization from free text with fuzzy matching."""
+        """Infer specialization from free text, symptoms, or fuzzy matching."""
         if not message:
             return None
 
         text = message.lower()
-        synonyms = self._specialization_synonyms()
 
+        # First check for symptom keywords - this handles "rash", "skin issue", etc.
+        symptom_mapping = self._symptom_to_specialization()
+        for symptom, spec in symptom_mapping.items():
+            if symptom in text:
+                logger.info(f"Detected symptom '{symptom}' -> suggesting '{spec}'")
+                return spec
+
+        # Then check for specialization synonyms (cardiologist -> cardiology)
+        synonyms = self._specialization_synonyms()
         for key, value in synonyms.items():
             if key in text:
                 return value
 
+        # Check for direct specialization mentions
         known_specializations = {
             str(d.get("specialization")).lower()
             for d in doctor_data
@@ -2017,6 +2185,7 @@ class ChatService:
             if spec and spec in text:
                 return self._normalize_specialization(spec)
 
+        # Fuzzy matching as last resort
         tokens = re.findall(r"[a-zA-Z]+", text)
         candidates = set(known_specializations) | set(synonyms.keys()) | set(synonyms.values())
         for token in tokens:
@@ -2228,76 +2397,94 @@ class ChatService:
         except (ValueError, IndexError):
             return time_str  # Return original if parsing fails
 
-    def _format_slots(self, slots: List[Dict[str, Any]], show_range: bool = True) -> str:
-        """Format availability slots for display.
+    def _format_slots(self, slots: List[Dict[str, Any]], show_range: bool = True, target_date: Optional[date] = None) -> str:
+        """Format availability slots for display, grouped by time of day.
 
         Args:
             slots: List of slot dictionaries with start_time
             show_range: If True, show a summary range for many slots
+            target_date: If provided and is today, filter out past slots
 
         Returns:
-            Formatted string of available times
+            Formatted string of available times grouped by Morning/Afternoon/Evening
         """
         if not slots:
             return "No slots available"
 
-        # Get all slot times
+        # Get current time for filtering past slots (IST)
+        now = datetime.now()
+        is_today = target_date == date.today() if target_date else False
+
+        # Get all slot times, filtering past slots if today
         all_times = []
         for slot in slots:
             start = slot.get("start_time")
             if start:
+                # Filter out past slots for today
+                if is_today:
+                    try:
+                        slot_hour = int(start.split(":")[0])
+                        slot_minute = int(start.split(":")[1]) if len(start.split(":")) > 1 else 0
+                        if slot_hour < now.hour or (slot_hour == now.hour and slot_minute <= now.minute):
+                            continue  # Skip past slots
+                    except:
+                        pass
                 all_times.append(start)
 
         if not all_times:
+            if is_today:
+                return "No more slots available today (all remaining slots have passed)"
             return "No slots available"
 
-        total_slots = len(all_times)
+        # Group by time of day: Morning (before 12), Afternoon (12-17), Evening (17+)
+        morning_slots = []
+        afternoon_slots = []
+        evening_slots = []
 
-        # For a large number of slots, show a range with sample times
-        if show_range and total_slots > 8:
-            # Group by time of day
-            morning_slots = []
-            afternoon_slots = []
-            for t in all_times:
-                try:
-                    hour = int(t.split(":")[0])
-                    if hour < 12:
-                        morning_slots.append(t)
-                    else:
-                        afternoon_slots.append(t)
-                except:
-                    pass
-
-            parts = []
-            if morning_slots:
-                first_morning = self._format_slot_time(morning_slots[0])
-                last_morning = self._format_slot_time(morning_slots[-1])
-                if len(morning_slots) > 1:
-                    parts.append(f"Morning: {first_morning} - {last_morning} ({len(morning_slots)} slots)")
+        for t in all_times:
+            try:
+                hour = int(t.split(":")[0])
+                if hour < 12:
+                    morning_slots.append(t)
+                elif hour < 17:
+                    afternoon_slots.append(t)
                 else:
-                    parts.append(f"Morning: {first_morning}")
+                    evening_slots.append(t)
+            except:
+                pass
 
-            if afternoon_slots:
-                first_afternoon = self._format_slot_time(afternoon_slots[0])
-                last_afternoon = self._format_slot_time(afternoon_slots[-1])
-                if len(afternoon_slots) > 1:
-                    parts.append(f"Afternoon: {first_afternoon} - {last_afternoon} ({len(afternoon_slots)} slots)")
-                else:
-                    parts.append(f"Afternoon: {first_afternoon}")
+        # Build grouped output
+        parts = []
 
-            if parts:
-                return " | ".join(parts)
+        if morning_slots:
+            morning_formatted = [self._format_slot_time(t) for t in morning_slots]
+            if len(morning_slots) <= 4:
+                parts.append(f"🌅 Morning: {', '.join(morning_formatted)}")
+            else:
+                parts.append(f"🌅 Morning: {morning_formatted[0]} - {morning_formatted[-1]} ({len(morning_slots)} slots)")
 
-        # For fewer slots, show individual times (up to 10)
-        formatted = []
-        for slot in slots[:10]:
-            start = slot.get("start_time")
-            if start:
-                formatted.append(self._format_slot_time(start))
+        if afternoon_slots:
+            afternoon_formatted = [self._format_slot_time(t) for t in afternoon_slots]
+            if len(afternoon_slots) <= 4:
+                parts.append(f"☀️ Afternoon: {', '.join(afternoon_formatted)}")
+            else:
+                parts.append(f"☀️ Afternoon: {afternoon_formatted[0]} - {afternoon_formatted[-1]} ({len(afternoon_slots)} slots)")
 
+        if evening_slots:
+            evening_formatted = [self._format_slot_time(t) for t in evening_slots]
+            if len(evening_slots) <= 4:
+                parts.append(f"🌙 Evening: {', '.join(evening_formatted)}")
+            else:
+                parts.append(f"🌙 Evening: {evening_formatted[0]} - {evening_formatted[-1]} ({len(evening_slots)} slots)")
+
+        if parts:
+            return " | ".join(parts)
+
+        # Fallback: show individual times
+        formatted = [self._format_slot_time(t) for t in all_times[:10]]
         result = ", ".join(formatted)
-        if total_slots > 10:
-            result += f" (and {total_slots - 10} more)"
+        if len(all_times) > 10:
+            result += f" (and {len(all_times) - 10} more)"
 
         return result
 
@@ -2344,6 +2531,50 @@ class ChatService:
             return False
         return left_norm in right_norm or right_norm in left_norm
 
+    def _extract_date_from_message(self, message: str) -> Optional[str]:
+        """Extract date keywords from a message more intelligently.
+
+        This handles cases like "today any availability?" where the date
+        is embedded in a longer question.
+        """
+        if not message:
+            return None
+
+        text = message.lower()
+
+        # Check for today/tomorrow keywords first
+        today_patterns = [
+            r"\btoday\b", r"\b2day\b", r"\btday\b", r"\btoday's\b"
+        ]
+        for pattern in today_patterns:
+            if re.search(pattern, text):
+                return "today"
+
+        tomorrow_patterns = [
+            r"\btomorrow\b", r"\btommorow\b", r"\btomorow\b", r"\btmrw\b",
+            r"\btmr\b", r"\b2morrow\b", r"\btmorow\b", r"\btomrow\b"
+        ]
+        for pattern in tomorrow_patterns:
+            if re.search(pattern, text):
+                return "tomorrow"
+
+        # Check for specific date patterns (e.g., "Feb 5", "5th February", "2026-02-05")
+        date_patterns = [
+            r"\b\d{4}-\d{2}-\d{2}\b",  # ISO format
+            r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",  # MM/DD/YYYY or DD/MM/YYYY
+            r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?\b",  # "Feb 5th"
+            r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b",  # "5th Feb"
+            r"\bnext\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            r"\bthis\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        ]
+        for pattern in date_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(0)
+
+        # If no date found, return the full message for fuzzy parsing
+        return message
+
     def _parse_date(self, value: Optional[str]) -> Optional[date]:
         """Parse a date string into a date object."""
         if not value:
@@ -2353,19 +2584,25 @@ class ChatService:
             today = date.today()
 
             # Handle common variations and typos for "tomorrow"
-            tomorrow_variants = ["tomorrow", "tommorow", "tomorow", "tmrw", "tmr", "2morrow"]
+            tomorrow_variants = [
+                "tomorrow", "tommorow", "tomorow", "tmrw", "tmr", "2morrow",
+                "tmorow", "tomrow", "tommorrow", "tomorrrow", "tmorrow", "tomarrow"
+            ]
             if any(variant in normalized for variant in tomorrow_variants):
-                from datetime import timedelta
                 return today + timedelta(days=1)
 
-            # Handle "today"
-            if "today" in normalized:
+            # Handle "today" and variations
+            today_variants = ["today", "2day", "tday", "toady", "today's"]
+            if any(variant in normalized for variant in today_variants):
                 return today
 
             # Handle "day after tomorrow"
             if "day after" in normalized or "after tomorrow" in normalized:
-                from datetime import timedelta
                 return today + timedelta(days=2)
+
+            # Handle "next week" variations
+            if "next week" in normalized:
+                return today + timedelta(days=7)
 
             parsed_date = date_parser.parse(value, fuzzy=True).date()
             # If parsed date is in the past and no year was specified, assume next year
