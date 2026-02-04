@@ -1,4 +1,4 @@
-# Dockerfile for Chatbot Frontend
+# Dockerfile for Admin Portal Frontend
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -12,7 +12,7 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build the application (Create React App outputs to 'build' folder)
+# Build the application
 RUN npm run build
 
 # Production stage
@@ -21,8 +21,8 @@ FROM nginx:alpine
 # Copy custom nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Copy built assets (CRA uses 'build' folder, not 'dist')
-COPY --from=builder /app/build /usr/share/nginx/html
+# Copy built assets
+COPY --from=builder /app/dist /usr/share/nginx/html
 
 # Add script to inject environment variables at runtime
 COPY docker-entrypoint.sh /docker-entrypoint.sh

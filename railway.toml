@@ -1,0 +1,11 @@
+# Railway Configuration for Calendar Booking Platform
+# This project deploys as multiple services on Railway
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

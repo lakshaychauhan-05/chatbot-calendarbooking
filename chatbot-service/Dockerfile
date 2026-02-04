@@ -20,8 +20,12 @@ RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
 USER app
 
-# Expose port
-EXPOSE 8001
+# Expose port (Railway sets PORT env var)
+EXPOSE 8002
 
-# Run the application
-CMD ["python", "run_chatbot.py"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8002}/api/v1/health/ || exit 1
+
+# Run the application (Railway sets PORT automatically)
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8002}
