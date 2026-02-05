@@ -13,7 +13,7 @@ from app.models.appointment import Appointment, AppointmentStatus, AppointmentSo
 from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.config import settings
-from app.utils.datetime_utils import to_utc
+from app.utils.datetime_utils import to_utc, now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,10 @@ class CalendarSyncService:
         # 1. Fetch events from Google Calendar
         calendar_events = await self._fetch_calendar_events(doctor_email)
         
-        # 2. Fetch appointments from database
+        # 2. Fetch appointments from database (using IST date)
         db_appointments = db.query(Appointment).filter(
             Appointment.doctor_email == doctor.email,
-            Appointment.date >= date.today(),
+            Appointment.date >= now_ist().date(),
             Appointment.status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED])
         ).all()
         

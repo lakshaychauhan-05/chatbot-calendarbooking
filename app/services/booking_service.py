@@ -21,7 +21,7 @@ from app.services.availability_service import AvailabilityService
 from app.services.calendar_sync_queue import calendar_sync_queue
 from app.services.google_calendar_service import GoogleCalendarService
 from app.services.rag_sync_service import RAGSyncService
-from app.utils.datetime_utils import to_utc
+from app.utils.datetime_utils import to_utc, now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,8 @@ class BookingService:
             if requested_name and actual_name and requested_name not in actual_name and actual_name not in requested_name:
                 raise ValueError("Doctor name does not match the selected doctor")
 
-        # Prevent booking in the past
-        if booking_data.date < date.today():
+        # Prevent booking in the past (using IST timezone)
+        if booking_data.date < now_ist().date():
             raise ValueError("Appointment date cannot be in the past")
 
         # Calculate slot end time based on doctor's slot duration

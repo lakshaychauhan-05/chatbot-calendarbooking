@@ -40,7 +40,7 @@ class Appointment(Base):
     date = Column(Date, nullable=False, index=True)
     start_time = Column(Time, nullable=False)
     end_time = Column(Time, nullable=False)
-    timezone = Column(String(64), nullable=False, default="UTC")
+    timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
     start_at_utc = Column(DateTime(timezone=True), nullable=False, index=True)
     end_at_utc = Column(DateTime(timezone=True), nullable=False, index=True)
     status = Column(SQLEnum(AppointmentStatus), default=AppointmentStatus.BOOKED, nullable=False, index=True)
@@ -62,7 +62,7 @@ class Appointment(Base):
         Index('idx_appointment_doctor_date_start', 'doctor_email', 'date', 'start_time'),
         ExcludeConstraint(
             ("doctor_email", "="),
-            (func.tstzrange(start_at_utc, end_at_utc, "[]"), "&&"),
+            (func.tstzrange(start_at_utc, end_at_utc, "[)"), "&&"),  # [) = inclusive start, exclusive end
             name="exclude_overlapping_appointments",
             where=status.in_([AppointmentStatus.BOOKED, AppointmentStatus.RESCHEDULED])
         ),

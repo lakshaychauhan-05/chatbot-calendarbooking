@@ -22,6 +22,7 @@ from app.services.availability_service import AvailabilityService
 from app.config import settings
 from app.services.booking_service import BookingService
 from app.services.idempotency_service import IdempotencyService
+from app.utils.datetime_utils import now_ist
 import logging
 import threading
 
@@ -49,7 +50,7 @@ async def get_availability(
     Database is the single source of truth for availability.
     """
     try:
-        today = datetime.now(timezone.utc).date()
+        today = now_ist().date()
         max_date = today + timedelta(days=settings.MAX_AVAILABILITY_DAYS)
         if date < today or date > max_date:
             raise HTTPException(
@@ -193,7 +194,7 @@ async def search_availability(
             )
 
         if target_date:
-            today = datetime.now(timezone.utc).date()
+            today = now_ist().date()
             max_date = today + timedelta(days=settings.MAX_AVAILABILITY_DAYS)
             if target_date < today or target_date > max_date:
                 raise HTTPException(

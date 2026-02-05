@@ -1,5 +1,6 @@
 """
 Main Chat Service that orchestrates LLM, calendar client, and conversation management.
+All times are in IST (Asia/Kolkata).
 """
 import logging
 import re
@@ -10,6 +11,10 @@ from difflib import get_close_matches
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, date, timedelta, time as dt_time
 from dateutil import parser as date_parser
+from zoneinfo import ZoneInfo
+
+# IST timezone
+IST = ZoneInfo("Asia/Kolkata")
 
 import redis
 
@@ -2413,8 +2418,8 @@ class ChatService:
             return "No slots available"
 
         # Get current time for filtering past slots (IST)
-        now = datetime.now()
-        is_today = target_date == date.today() if target_date else False
+        now = datetime.now(IST)
+        is_today = target_date == now.date() if target_date else False
 
         # Get all slot times, filtering past slots if today
         all_times = []
@@ -2579,12 +2584,12 @@ class ChatService:
         return message
 
     def _parse_date(self, value: Optional[str]) -> Optional[date]:
-        """Parse a date string into a date object."""
+        """Parse a date string into a date object. Uses IST timezone."""
         if not value:
             return None
         try:
             normalized = value.lower().strip()
-            today = date.today()
+            today = datetime.now(IST).date()
 
             # Handle common variations and typos for "tomorrow"
             tomorrow_variants = [
@@ -2612,7 +2617,7 @@ class ChatService:
             if parsed_date < today and parsed_date.year == today.year:
                 # Check if user said "next" or similar
                 if "next" in normalized:
-                    parsed_date = date_parser.parse(value, fuzzy=True, default=datetime.now()).date()
+                    parsed_date = date_parser.parse(value, fuzzy=True, default=datetime.now(IST)).date()
                 else:
                     # Try parsing with next year
                     try:

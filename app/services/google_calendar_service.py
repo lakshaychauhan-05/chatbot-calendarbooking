@@ -122,10 +122,11 @@ class GoogleCalendarService:
         try:
             service = self._get_service(doctor_email)
             
+            # Always use IST (Asia/Kolkata) as default timezone
             try:
-                tz = ZoneInfo(timezone_name) if timezone_name else timezone.utc
+                tz = ZoneInfo(timezone_name) if timezone_name else ZoneInfo("Asia/Kolkata")
             except Exception:
-                tz = timezone.utc
+                tz = ZoneInfo("Asia/Kolkata")
             start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
             end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
             
@@ -220,10 +221,11 @@ class GoogleCalendarService:
                     return False
                 raise  # Re-raise other HTTP errors
 
+            # Always use IST (Asia/Kolkata) as default timezone
             try:
-                tz = ZoneInfo(timezone_name) if timezone_name else timezone.utc
+                tz = ZoneInfo(timezone_name) if timezone_name else ZoneInfo("Asia/Kolkata")
             except Exception:
-                tz = timezone.utc
+                tz = ZoneInfo("Asia/Kolkata")
             start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
             end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
 

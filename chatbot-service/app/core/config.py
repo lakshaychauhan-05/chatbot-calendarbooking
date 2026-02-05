@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     MAX_CONVERSATION_HISTORY: int = 50  # Fallback if turns not set
     CONVERSATION_TIMEOUT_MINUTES: int = 30
 
+    # Timezone - always use IST
+    DEFAULT_TIMEZONE: str = "Asia/Kolkata"
+
     class Config:
         env_file = ".env"
         case_sensitive = False
