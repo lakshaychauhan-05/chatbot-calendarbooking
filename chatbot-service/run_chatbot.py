@@ -25,7 +25,7 @@ def _select_port() -> int:
     if preferred_port == 8001:
         preferred_port = 8002
 
-    fallback_ports = [preferred_port, 8002, 8001, 8003, 8004]
+    fallback_ports = [preferred_port, 8003, 8002, 8001, 8004]
     for port in fallback_ports:
         if _port_available(port, settings.HOST):
             return port

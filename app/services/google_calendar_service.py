@@ -133,7 +133,11 @@ class GoogleCalendarService:
             # Format for Google Calendar (RFC3339)
             start_rfc3339 = start_datetime.isoformat()
             end_rfc3339 = end_datetime.isoformat()
-            
+
+            # Debug logging for timezone issues
+            logger.info(f"GCal CREATE: input_time={start_time}, timezone_param={timezone_name}, resolved_tz={tz}")
+            logger.info(f"GCal CREATE: start_datetime={start_datetime}, rfc3339={start_rfc3339}")
+
             event = {
                 'summary': f'Appointment: {patient_name}',
                 'description': description or f'Appointment with {patient_name}',
@@ -146,11 +150,11 @@ class GoogleCalendarService:
                     'timeZone': str(tz),
                 },
             }
-            
+
             event = self._execute_with_retry(
                 lambda: service.events().insert(calendarId=doctor_email, body=event).execute()
             )
-            
+
             logger.info(f"Created Google Calendar event {event.get('id')} for doctor {doctor_email}")
             return event.get('id')
             
