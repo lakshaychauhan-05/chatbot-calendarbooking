@@ -122,21 +122,32 @@ class GoogleCalendarService:
         try:
             service = self._get_service(doctor_email)
             
-            # Always use IST (Asia/Kolkata) as default timezone
-            try:
-                tz = ZoneInfo(timezone_name) if timezone_name else ZoneInfo("Asia/Kolkata")
-            except Exception:
-                tz = ZoneInfo("Asia/Kolkata")
+            # Always use IST (Asia/Kolkata) as default timezone - CRITICAL for correct time display
+            # If timezone_name is None, empty, or "UTC", force IST since all users are in India
+            default_tz = ZoneInfo("Asia/Kolkata")
+            tz = default_tz
+
+            if timezone_name and timezone_name.strip():
+                try:
+                    tz = ZoneInfo(timezone_name)
+                except Exception as tz_error:
+                    logger.warning(f"Invalid timezone '{timezone_name}', defaulting to IST: {tz_error}")
+                    tz = default_tz
+            else:
+                logger.warning(f"No timezone provided, defaulting to IST (Asia/Kolkata)")
+
             start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
             end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
-            
+
             # Format for Google Calendar (RFC3339)
             start_rfc3339 = start_datetime.isoformat()
             end_rfc3339 = end_datetime.isoformat()
 
-            # Debug logging for timezone issues
+            # Enhanced debug logging for timezone troubleshooting
+            logger.info(f"GCal CREATE: doctor={doctor_email}, date={appointment_date}")
             logger.info(f"GCal CREATE: input_time={start_time}, timezone_param={timezone_name}, resolved_tz={tz}")
-            logger.info(f"GCal CREATE: start_datetime={start_datetime}, rfc3339={start_rfc3339}")
+            logger.info(f"GCal CREATE: start_datetime={start_datetime}, end_datetime={end_datetime}")
+            logger.info(f"GCal CREATE: rfc3339_start={start_rfc3339}, rfc3339_end={end_rfc3339}")
 
             event = {
                 'summary': f'Appointment: {patient_name}',
@@ -225,16 +236,28 @@ class GoogleCalendarService:
                     return False
                 raise  # Re-raise other HTTP errors
 
-            # Always use IST (Asia/Kolkata) as default timezone
-            try:
-                tz = ZoneInfo(timezone_name) if timezone_name else ZoneInfo("Asia/Kolkata")
-            except Exception:
-                tz = ZoneInfo("Asia/Kolkata")
+            # Always use IST (Asia/Kolkata) as default timezone - CRITICAL for correct time display
+            default_tz = ZoneInfo("Asia/Kolkata")
+            tz = default_tz
+
+            if timezone_name and timezone_name.strip():
+                try:
+                    tz = ZoneInfo(timezone_name)
+                except Exception as tz_error:
+                    logger.warning(f"Invalid timezone '{timezone_name}', defaulting to IST: {tz_error}")
+                    tz = default_tz
+            else:
+                logger.warning(f"No timezone provided for update, defaulting to IST (Asia/Kolkata)")
+
             start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
             end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
 
             start_rfc3339 = start_datetime.isoformat()
             end_rfc3339 = end_datetime.isoformat()
+
+            # Enhanced debug logging for timezone troubleshooting
+            logger.info(f"GCal UPDATE: event_id={event_id}, timezone_param={timezone_name}, resolved_tz={tz}")
+            logger.info(f"GCal UPDATE: start_datetime={start_datetime}, rfc3339={start_rfc3339}")
 
             event['summary'] = f'Appointment: {patient_name}'
             event['description'] = description or f'Appointment with {patient_name}'

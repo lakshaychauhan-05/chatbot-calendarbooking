@@ -88,9 +88,15 @@ class BookingService:
         end_datetime = start_datetime + timedelta(minutes=doctor.slot_duration_minutes)
         slot_end_time = end_datetime.time()
 
+        # Use doctor's timezone, defaulting to IST if not set
         appointment_tz = doctor.timezone or settings.DEFAULT_TIMEZONE
+        if not doctor.timezone:
+            logger.warning(f"Doctor {doctor.email} has no timezone set, using default: {settings.DEFAULT_TIMEZONE}")
+        logger.info(f"Booking timezone: doctor_tz={doctor.timezone}, resolved_tz={appointment_tz}")
+
         start_at_utc = to_utc(booking_data.date, booking_data.start_time, appointment_tz)
         end_at_utc = to_utc(booking_data.date, slot_end_time, appointment_tz)
+        logger.info(f"Booking times: local={booking_data.start_time}, utc={start_at_utc}, tz={appointment_tz}")
 
         # Validate slot availability
         if not self.availability_service.is_slot_available(

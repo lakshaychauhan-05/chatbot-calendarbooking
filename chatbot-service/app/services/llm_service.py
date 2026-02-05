@@ -63,6 +63,16 @@ Guidelines:
 - Clarifying questions about timing/slots are NOT confirmations - they should be check_availability
 - "yes", "no", "confirm" are confirmation/rejection responses - not separate intents
 
+IMPORTANT - Detect get_doctor_info intent:
+- "tell me more about Dr. X" or "tell me about Dr. X" -> get_doctor_info
+- "more about Dr. X" or "what about Dr. X" -> get_doctor_info
+- "who is Dr. X" or "describe Dr. X" -> get_doctor_info
+- These should NOT be classified as book_appointment even if user is in a booking flow
+
+IMPORTANT - Symptoms indicate booking intent:
+- If user mentions health symptoms like "I have skin problem", "I have fever", "my back hurts" -> book_appointment
+- Symptoms should be used to infer the needed specialization (skin -> dermatology, fever -> general medicine, etc.)
+
 Conversation history (most recent last):
 {history}
 
@@ -98,6 +108,14 @@ CRITICAL GUIDELINES for distinguishing entities:
 4. specialization: Medical fields like "dermatology", "cardiology", "skin", "heart", "ENT". Do NOT change the specialization mentioned in conversation history unless user explicitly requests a different specialty.
 5. Use history to resolve pronouns like "him/her/that doctor" into a doctor_name when possible.
 6. If user mentions a specialty earlier (e.g., "dermatology" or "skin") and continues the conversation, do NOT change it to a different specialty unless explicitly requested.
+
+SYMPTOM-TO-SPECIALIZATION MAPPING (extract both symptoms AND infer specialization):
+- Skin issues (rash, itching, acne, pimples, skin problem) -> symptoms: [issue], specialization: "dermatology"
+- Heart issues (chest pain, palpitation, BP problems) -> symptoms: [issue], specialization: "cardiology"
+- Bone/joint issues (back pain, knee pain, fracture) -> symptoms: [issue], specialization: "orthopedics"
+- General issues (fever, cold, cough, headache) -> symptoms: [issue], specialization: "general medicine"
+- Women's health (pregnancy, period problems) -> symptoms: [issue], specialization: "gynecology"
+- Children's health (child illness, baby care) -> symptoms: [issue], specialization: "pediatrics"
 
 Conversation history (most recent last):
 {history}

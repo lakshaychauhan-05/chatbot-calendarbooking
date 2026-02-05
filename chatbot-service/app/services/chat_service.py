@@ -195,7 +195,18 @@ class ChatService:
                     not self._names_match(explicit_new_doctor, current_doctor)
                 )
 
-                if wants_to_break_out:
+                # Check if user is asking for MORE INFO about a doctor (not selecting them)
+                # Patterns: "tell me more about Dr. X", "more about Dr. X", "what about Dr. X"
+                is_asking_doctor_info = (
+                    explicit_new_doctor and self._is_asking_doctor_info(request.message)
+                )
+
+                if is_asking_doctor_info:
+                    # User wants info about a doctor, not selecting them
+                    logger.info(f"User asking for info about '{explicit_new_doctor}' during booking flow")
+                    intent_classification.intent = IntentType.GET_DOCTOR_INFO
+                    # Don't reset state - allow returning to booking after viewing info
+                elif wants_to_break_out:
                     # User wants general info, break out of booking flow
                     logger.info("User wants to break out of booking flow")
                     self.conversation_manager.update_conversation(
@@ -388,6 +399,25 @@ class ChatService:
         # Extract booking details from entities and fallback parsing
         extracted = self._extract_booking_details_from_entities(intent.entities)
         explicit_doctor_name = self._match_doctor_name_in_message(message, doctor_data)
+
+        # Check if user is asking for MORE INFO about a doctor, not selecting them
+        # Patterns like "tell me more about Dr. X" should trigger info display, not selection
+        if explicit_doctor_name and self._is_asking_doctor_info(message):
+            logger.info(f"User asking for info about doctor '{explicit_doctor_name}', redirecting to doctor info intent")
+            doctor = self._find_doctor_by_name(explicit_doctor_name, doctor_data)
+            if doctor:
+                # Update context to track this doctor for future reference
+                self.conversation_manager.update_conversation(
+                    conversation_id=conversation_id,
+                    context={
+                        "last_doctor_name": doctor.get("name"),
+                        "last_doctor_email": doctor.get("email"),
+                        "last_specialization": doctor.get("specialization")
+                    }
+                )
+                # Return doctor info instead of continuing booking
+                return self._format_single_doctor_info(doctor, include_booking_prompt=True)
+
         if explicit_doctor_name:
             extracted["doctor_name"] = explicit_doctor_name
         elif extracted.get("doctor_name") and not self._mentions_doctor_pronoun(message):
@@ -1336,7 +1366,46 @@ class ChatService:
             if conversation_context.get("last_specialization"):
                 extracted["specialization"] = conversation_context.get("last_specialization")
 
+        # Extract specialization from symptoms if not already set
+        # This handles cases like "I have skin problem" -> dermatology
+        if not booking_context.get("specialization") and not extracted.get("specialization"):
+            symptom_spec = self._extract_specialization_from_symptoms(message)
+            if symptom_spec:
+                extracted["specialization"] = symptom_spec
+                # Also store the symptoms for context
+                extracted["symptoms"] = self._extract_symptom_keywords(message)
+                logger.info(f"Detected symptom-based specialization: '{symptom_spec}' from message: '{message}'")
+
         return extracted
+
+    def _extract_specialization_from_symptoms(self, message: str) -> Optional[str]:
+        """Extract specialization from symptom keywords in the message."""
+        if not message:
+            return None
+
+        text = message.lower()
+        symptom_mapping = self._symptom_to_specialization()
+
+        for symptom, spec in symptom_mapping.items():
+            if symptom in text:
+                return spec
+
+        return None
+
+    def _extract_symptom_keywords(self, message: str) -> Optional[str]:
+        """Extract symptom keywords from message for storage."""
+        if not message:
+            return None
+
+        text = message.lower()
+        symptom_mapping = self._symptom_to_specialization()
+        found_symptoms = []
+
+        for symptom in symptom_mapping.keys():
+            if symptom in text:
+                found_symptoms.append(symptom)
+
+        return ", ".join(found_symptoms) if found_symptoms else None
 
     def _extract_phone_from_text(self, message: str) -> Optional[str]:
         """Extract phone number from text when explicitly mentioned."""
@@ -1800,6 +1869,82 @@ class ChatService:
                 return True
 
         return False
+
+    def _is_asking_doctor_info(self, message: str) -> bool:
+        """Check if user is asking for information about a specific doctor.
+
+        This detects patterns like:
+        - "tell me more about Dr. X"
+        - "more about Dr. X"
+        - "what about Dr. X"
+        - "tell me about Dr. X" (when in booking context, treated as info request)
+        """
+        if not message:
+            return False
+
+        message_lower = message.lower().strip()
+
+        # Explicit info request patterns with doctor mention
+        info_patterns = [
+            r"(tell me|know|learn|get|want)\s+(more\s+)?(about|info|information|details)",
+            r"more\s+about",
+            r"what\s+about",
+            r"info\s+(about|on)",
+            r"information\s+(about|on)",
+            r"details\s+(about|on|of)",
+            r"who\s+is",
+            r"describe",
+        ]
+
+        for pattern in info_patterns:
+            if re.search(pattern, message_lower):
+                return True
+
+        return False
+
+    def _format_single_doctor_info(self, doctor: Dict[str, Any], include_booking_prompt: bool = False) -> str:
+        """Format detailed information about a single doctor."""
+        if not doctor:
+            return "I couldn't find information about that doctor."
+
+        display_name = self._format_doctor_name(doctor.get("name"))
+        specialization = doctor.get("specialization", "specialist")
+        experience = doctor.get("experience_years", "several")
+        languages = self._safe_list(doctor.get("languages"))
+        working_days = self._safe_list(doctor.get("working_days"))
+        working_hours = doctor.get("working_hours") or {}
+        rating = doctor.get("rating")
+        reviews = doctor.get("patient_reviews")
+
+        pronoun = self._get_doctor_pronoun(doctor.get("name"))
+        pronoun_caps = pronoun.capitalize()
+
+        # Format working days with capitalization
+        formatted_days = ', '.join([d.capitalize() for d in working_days]) if working_days else 'select days'
+
+        # Build comprehensive info response
+        info_parts = [
+            f"{display_name} specializes in {specialization} and has {experience} years of experience."
+        ]
+
+        if languages:
+            info_parts.append(f"{pronoun_caps} speaks {', '.join(languages)}.")
+
+        info_parts.append(
+            f"{pronoun_caps} is available {formatted_days} "
+            f"from {working_hours.get('start', 'N/A')} to {working_hours.get('end', 'N/A')}."
+        )
+
+        if rating:
+            rating_text = f"{pronoun_caps} has a rating of {rating}"
+            if reviews:
+                rating_text += f" based on {reviews} patient reviews"
+            info_parts.append(rating_text + ".")
+
+        if include_booking_prompt:
+            info_parts.append(f"Would you like to book an appointment with {display_name}?")
+
+        return " ".join(info_parts)
 
     def _wants_info_about_all(self, message: str) -> bool:
         """Check if user wants information about ALL/BOTH doctors."""
