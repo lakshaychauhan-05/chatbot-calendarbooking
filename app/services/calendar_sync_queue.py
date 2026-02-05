@@ -188,12 +188,14 @@ class CalendarSyncQueue:
         try:
             job = db.query(CalendarSyncJob).filter(CalendarSyncJob.id == job_id).first()
             if not job:
+                db.close()
                 return
             appointment = db.query(Appointment).filter(Appointment.id == job.appointment_id).first()
             if not appointment:
                 job.status = "FAILED"
                 job.last_error = "Appointment not found"
                 db.commit()
+                db.close()
                 return
 
             if job.action in {"CREATE", "UPDATE"}:
@@ -202,6 +204,7 @@ class CalendarSyncQueue:
                     appointment.calendar_sync_status = "SYNCED"
                     appointment.calendar_sync_attempts = job.attempts
                     db.commit()
+                    db.close()
                     return
 
                 patient = db.query(Patient).filter(Patient.id == appointment.patient_id).first()
@@ -213,6 +216,7 @@ class CalendarSyncQueue:
                     appointment.calendar_sync_attempts = job.attempts
                     appointment.calendar_sync_next_attempt_at = None
                     db.commit()
+                    db.close()
                     return
 
                 if not appointment.google_calendar_event_id:
@@ -233,6 +237,7 @@ class CalendarSyncQueue:
                         appointment.calendar_sync_last_error = None
                         job.status = "COMPLETED"
                         db.commit()
+                        db.close()
                         return
                     job.last_error = self._calendar_service.last_error or "Calendar event creation failed"
                 else:
@@ -256,6 +261,7 @@ class CalendarSyncQueue:
                         appointment.calendar_sync_last_error = None
                         job.status = "COMPLETED"
                         db.commit()
+                        db.close()
                         return
                     job.last_error = self._calendar_service.last_error or "Calendar event update failed"
                 # fall through to retry logic
@@ -276,6 +282,7 @@ class CalendarSyncQueue:
                     appointment.calendar_sync_last_error = None
                     job.status = "COMPLETED"
                     db.commit()
+                    db.close()
                     return
                 job.last_error = self._calendar_service.last_error or "Calendar event delete failed"
 
@@ -293,15 +300,25 @@ class CalendarSyncQueue:
                 appointment.calendar_sync_attempts = job.attempts
                 appointment.calendar_sync_next_attempt_at = None
             db.commit()
+            db.close()  # Close after successful commit
         except Exception as e:
-            db.rollback()
             try:
-                job = db.query(CalendarSyncJob).filter(CalendarSyncJob.id == job_id).first()
+                db.rollback()
+            except Exception:
+                pass  # Ignore rollback errors
+            try:
+                db.close()
+            except Exception:
+                pass  # Ignore close errors
+            # Use a fresh session for error handling to avoid stale object issues
+            error_db = SessionLocal()
+            try:
+                job = error_db.query(CalendarSyncJob).filter(CalendarSyncJob.id == job_id).first()
                 appointment = None
                 if job:
-                    appointment = db.query(Appointment).filter(Appointment.id == job.appointment_id).first()
+                    appointment = error_db.query(Appointment).filter(Appointment.id == job.appointment_id).first()
                     job.status = "PENDING"
-                    job.last_error = str(e)
+                    job.last_error = str(e)[:500]  # Truncate to fit column
                     job.next_attempt_at = datetime.now(timezone.utc) + self._retry_delay(job.attempts)
                     if appointment:
                         appointment.calendar_sync_last_error = job.last_error
@@ -311,12 +328,14 @@ class CalendarSyncQueue:
                         job.status = "FAILED"
                         if appointment:
                             appointment.calendar_sync_status = "FAILED"
-                    db.commit()
-            except Exception:
-                db.rollback()
+                    error_db.commit()
+            except Exception as inner_e:
+                error_db.rollback()
+                logger.warning(f"Failed to update job status after error: {inner_e}")
+            finally:
+                error_db.close()
             logger.error(f"Calendar sync job failed: {e}")
-        finally:
-            db.close()
+            return  # Exit early since we already closed db
 
     def _retry_delay(self, attempts: int) -> timedelta:
         delay = self._retry_base * (2 ** max(attempts - 1, 0))
