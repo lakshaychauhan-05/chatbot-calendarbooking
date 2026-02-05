@@ -581,16 +581,44 @@ class ChatService:
             return await self._check_and_confirm_booking(conversation_id, booking_context, doctor_data)
 
     async def _handle_reschedule_intent(self, message: str, intent: Any, conversation_id: str) -> str:
-        """Handle appointment rescheduling intent."""
+        """Handle appointment rescheduling intent with context persistence."""
+        # Get existing context to preserve across multiple messages
+        conversation = self.conversation_manager.get_conversation(conversation_id)
+        existing_context = conversation.context if conversation else {}
+
+        # Start with existing reschedule data (CRITICAL: preserve across messages)
+        reschedule_context = {
+            "appointment_id": existing_context.get("appointment_id"),
+            "reschedule_date": existing_context.get("reschedule_date"),
+            "reschedule_time": existing_context.get("reschedule_time"),
+        }
+
+        # Extract new data from current message
         appointment_id = self._extract_appointment_id(message)
-        reschedule_context = {}
         if appointment_id:
             reschedule_context["appointment_id"] = appointment_id
 
         # Extract date/time entities for rescheduling
-        reschedule_context.update(self._extract_reschedule_details(intent.entities))
+        new_details = self._extract_reschedule_details(intent.entities)
+        if new_details.get("reschedule_date"):
+            reschedule_context["reschedule_date"] = new_details["reschedule_date"]
+        if new_details.get("reschedule_time"):
+            reschedule_context["reschedule_time"] = new_details["reschedule_time"]
+
+        # Also try to extract date/time from message text directly
+        if not reschedule_context.get("reschedule_date"):
+            date_from_text = self._extract_date_from_text(message)
+            if date_from_text:
+                reschedule_context["reschedule_date"] = date_from_text
+        if not reschedule_context.get("reschedule_time"):
+            time_from_text = self._extract_time_from_text(message)
+            if time_from_text:
+                reschedule_context["reschedule_time"] = time_from_text
+
+        # Update context with all gathered data
         self.conversation_manager.update_booking_context(conversation_id, reschedule_context)
 
+        # Check what's still missing
         missing_info = []
         if not reschedule_context.get("appointment_id"):
             missing_info.append("your appointment ID")
@@ -602,14 +630,18 @@ class ChatService:
         if missing_info:
             return f"I can help reschedule that. I still need {', '.join(missing_info)}."
 
+        # Format the date for display
+        date_display = self._format_date_display(reschedule_context.get('reschedule_date'))
+        time_display = reschedule_context.get('reschedule_time')
+
         self.conversation_manager.update_conversation(
             conversation_id=conversation_id,
             state=ConversationState.CONFIRMING_BOOKING,
             context={"pending_action": "reschedule"}
         )
         return (
-            "Please confirm: I will reschedule your appointment to "
-            f"{reschedule_context.get('reschedule_date')} at {reschedule_context.get('reschedule_time')}. "
+            f"Please confirm: I will reschedule your appointment to "
+            f"{date_display} at {time_display}. "
             "Reply with 'yes' to proceed or 'no' to cancel."
         )
 
@@ -866,6 +898,12 @@ class ChatService:
         if not requested_date:
             # Try to extract date from message more intelligently
             requested_date = self._extract_date_from_message(message)
+
+        # CRITICAL: Use date from context if not in current message
+        # This allows "check availability of naveen kapoor" after "6th feb" to remember the date
+        if not requested_date and context.get("availability_date"):
+            requested_date = context.get("availability_date")
+            logger.info(f"Using date from context: {requested_date}")
 
         date_obj = self._parse_date(requested_date)
         update_context = {}
@@ -2376,14 +2414,43 @@ class ChatService:
         message: str,
         doctor_data: List[Dict[str, Any]]
     ) -> Optional[str]:
-        """Find a doctor name mentioned in the message."""
+        """Find a doctor name mentioned in the message.
+
+        Uses exact matching first, then fuzzy matching for typo tolerance.
+        Examples: "navven" -> "naveen", "kapor" -> "kapoor"
+        """
         if not message:
             return None
         normalized_message = self._normalize_match_text(message)
+
+        # First pass: exact match
         for doctor in doctor_data:
             name = doctor.get("name")
             if name and self._normalize_doctor_name(name) in normalized_message:
                 return name
+
+        # Second pass: fuzzy match for typos (e.g., "navven" -> "naveen")
+        message_words = re.findall(r'[a-zA-Z]+', message.lower())
+        doctor_first_names = []
+        doctor_name_map = {}
+
+        for doctor in doctor_data:
+            name = doctor.get("name", "")
+            if not name:
+                continue
+            # Extract first name (after "Dr." if present)
+            first_name = name.replace("Dr.", "").replace("Dr", "").strip().split()[0].lower()
+            doctor_first_names.append(first_name)
+            doctor_name_map[first_name] = name
+
+        for word in message_words:
+            if len(word) >= 3:  # Only check words with 3+ characters
+                matches = get_close_matches(word, doctor_first_names, n=1, cutoff=0.7)
+                if matches:
+                    matched_first_name = matches[0]
+                    logger.info(f"Fuzzy matched '{word}' -> '{matched_first_name}'")
+                    return doctor_name_map[matched_first_name]
+
         return None
 
     def _find_doctor_by_name(
@@ -2391,14 +2458,35 @@ class ChatService:
         doctor_name: str,
         doctor_data: List[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        """Locate a doctor dict by name."""
+        """Locate a doctor dict by name with fuzzy matching for typo tolerance."""
+        if not doctor_name:
+            return None
+
         normalized_target = self._normalize_doctor_name(doctor_name)
+
+        # First pass: exact/substring match
         for doctor in doctor_data:
             normalized_candidate = self._normalize_doctor_name(doctor.get("name"))
             if normalized_target and (
                 normalized_target in normalized_candidate or normalized_candidate in normalized_target
             ):
                 return doctor
+
+        # Second pass: fuzzy match for typos
+        target_words = re.findall(r'[a-zA-Z]+', doctor_name.lower())
+        for doctor in doctor_data:
+            name = doctor.get("name", "")
+            if not name:
+                continue
+            candidate_words = re.findall(r'[a-zA-Z]+', name.lower())
+
+            for target_word in target_words:
+                if len(target_word) >= 3:
+                    matches = get_close_matches(target_word, candidate_words, n=1, cutoff=0.7)
+                    if matches:
+                        logger.info(f"Fuzzy matched doctor '{doctor_name}' -> '{name}'")
+                        return doctor
+
         return None
 
     def _find_doctor_by_email(
@@ -2729,12 +2817,17 @@ class ChatService:
         return message
 
     def _parse_date(self, value: Optional[str]) -> Optional[date]:
-        """Parse a date string into a date object. Uses IST timezone."""
+        """Parse a date string into a date object. Uses IST timezone.
+
+        CRITICAL: Always uses current year as default, and if date is in the past,
+        automatically uses next year to avoid booking in the past.
+        """
         if not value:
             return None
         try:
             normalized = value.lower().strip()
             today = datetime.now(IST).date()
+            current_year = today.year
 
             # Handle common variations and typos for "tomorrow"
             tomorrow_variants = [
@@ -2757,19 +2850,17 @@ class ChatService:
             if "next week" in normalized:
                 return today + timedelta(days=7)
 
-            parsed_date = date_parser.parse(value, fuzzy=True).date()
-            # If parsed date is in the past and no year was specified, assume next year
-            if parsed_date < today and parsed_date.year == today.year:
-                # Check if user said "next" or similar
-                if "next" in normalized:
-                    parsed_date = date_parser.parse(value, fuzzy=True, default=datetime.now(IST)).date()
-                else:
-                    # Try parsing with next year
-                    try:
-                        parsed_date = date_parser.parse(value, fuzzy=True, default=datetime(today.year + 1, 1, 1)).date()
-                    except Exception as e:
-                        logger.debug(f"Failed to parse date '{value}' with next year fallback: {e}")
-                        pass
+            # Parse with current year as explicit default to avoid ancient dates like 2022
+            default_datetime = datetime(current_year, 1, 1, tzinfo=IST)
+            parsed_date = date_parser.parse(value, fuzzy=True, default=default_datetime).date()
+
+            # If parsed date is in the past, use next year
+            if parsed_date < today:
+                next_year_default = datetime(current_year + 1, 1, 1, tzinfo=IST)
+                parsed_date = date_parser.parse(value, fuzzy=True, default=next_year_default).date()
+                logger.info(f"Date '{value}' was in past, adjusted to next year: {parsed_date}")
+
+            logger.info(f"Parsed date '{value}' -> {parsed_date}")
             return parsed_date
         except Exception as e:
             logger.warning(f"Failed to parse date '{value}': {e}")
