@@ -87,6 +87,25 @@ Return only a JSON object with the following structure:
 
         return template
 
+    def _create_combined_intent_entity_prompt(self) -> str:
+        """Create a combined prompt for intent classification AND entity extraction in one call."""
+        template = """You are an AI assistant for a medical appointment booking system. Analyze the user message and:
+1. Classify the intent
+2. Extract relevant entities
+
+INTENTS: book_appointment, reschedule_appointment, cancel_appointment, get_doctor_info, check_availability, get_my_appointments, general_info, unknown
+
+ENTITIES: date, time, doctor_name, specialization, patient_name, phone_number, email, symptoms
+
+SYMPTOM MAPPING: skin issues->dermatology, heart->cardiology, bone/joint->orthopedics, fever/cold->general medicine, women's health->gynecology, children->pediatrics
+
+History: {history}
+Message: {message}
+
+Return JSON:
+{{"intent":"intent_type","confidence":0.9,"entities":[{{"type":"entity_type","value":"extracted_value","confidence":0.9}}]}}"""
+        return template
+
     def _create_entity_prompt(self) -> str:
         """Create prompt template for entity extraction."""
         template = """Extract relevant entities from the user's message for appointment booking.
@@ -169,14 +188,19 @@ Generate the response:"""
 
         return template
 
-    async def _call_llm(self, prompt: str) -> str:
-        """Call OpenAI chat completion API with a single prompt."""
+    async def _call_llm(self, prompt: str, max_tokens: Optional[int] = None) -> str:
+        """Call OpenAI chat completion API with a single prompt.
+
+        Args:
+            prompt: The prompt to send
+            max_tokens: Override default max_tokens (use lower values for structured outputs to save costs)
+        """
         if not settings.OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY is not set")
         response = await self._client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             temperature=settings.OPENAI_TEMPERATURE,
-            max_tokens=settings.OPENAI_MAX_TOKENS,
+            max_tokens=max_tokens or settings.OPENAI_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}]
         )
         if not response.choices:
@@ -185,29 +209,42 @@ Generate the response:"""
         return (content or "").strip()
 
     async def classify_intent(self, message: str, context: Optional[List[ChatMessage]] = None) -> IntentClassification:
-        """Classify the intent of a user message."""
+        """Classify the intent of a user message and extract entities in ONE API call (cost optimized)."""
         try:
-            # Prepare conversation history
-            history_text = self._format_history(context)
+            # Prepare conversation history (limit to last 6 messages for cost savings)
+            history_text = self._format_history(context[-6:] if context else None)
 
-            prompt = self.intent_prompt.format(
+            # Use combined prompt for single API call (saves 33% on API costs)
+            prompt = self._create_combined_intent_entity_prompt().format(
                 message=message,
                 history=history_text
             )
-            response_text = await self._call_llm(prompt)
+            response_text = await self._call_llm(prompt, max_tokens=300)
 
             # Try to parse JSON
             try:
-                intent_data = json.loads(response_text)
-                intent_type = IntentType(intent_data.get("intent", "unknown"))
-                confidence = min(max(float(intent_data.get("confidence", 0.5)), 0.0), 1.0)
+                data = json.loads(response_text)
+                intent_type = IntentType(data.get("intent", "unknown"))
+                confidence = min(max(float(data.get("confidence", 0.5)), 0.0), 1.0)
+
+                # Extract entities from combined response
+                entities = []
+                for entity_data in data.get("entities", []):
+                    try:
+                        entity_type = EntityType(entity_data["type"])
+                        entities.append(ExtractedEntity(
+                            type=entity_type,
+                            value=entity_data["value"],
+                            confidence=min(max(float(entity_data.get("confidence", 0.8)), 0.0), 1.0)
+                        ))
+                    except (KeyError, ValueError):
+                        continue
+
             except (json.JSONDecodeError, ValueError):
                 # Fallback to unknown intent
                 intent_type = IntentType.UNKNOWN
                 confidence = 0.0
-
-            # Extract entities
-            entities = await self.extract_entities(message, context)
+                entities = []
 
             return IntentClassification(
                 intent=intent_type,
@@ -266,15 +303,18 @@ Generate the response:"""
     ) -> str:
         """Generate a natural language response."""
         try:
-            # Prepare context
-            history_text = self._format_history(context)
+            # Prepare context - limit history to last 4 messages for cost savings
+            history_text = self._format_history(context[-4:] if context else None)
 
-            entities_text = json.dumps([
-                {"type": e.type.value, "value": e.value, "confidence": e.confidence}
-                for e in intent.entities
-            ], indent=2)
+            # Compact entity format (saves tokens)
+            entities_text = ",".join([f"{e.type.value}:{e.value}" for e in intent.entities]) or "none"
 
-            doctor_text = json.dumps(doctor_info or {}, indent=2)
+            # Only include relevant doctor fields to save tokens
+            if doctor_info:
+                doctor_text = json.dumps({k: v for k, v in doctor_info.items()
+                    if k in ("name", "specialization", "available_slots", "next_available")}, separators=(',', ':'))
+            else:
+                doctor_text = "{}"
 
             prompt = self.response_prompt.format(
                 message=message,
@@ -283,7 +323,8 @@ Generate the response:"""
                 history=history_text,
                 doctor_info=doctor_text
             )
-            return await self._call_llm(prompt)
+            # Use 400 max tokens for responses (sufficient for 2-4 sentences)
+            return await self._call_llm(prompt, max_tokens=400)
 
         except Exception as e:
             logger.error(f"Error generating response: {e}")

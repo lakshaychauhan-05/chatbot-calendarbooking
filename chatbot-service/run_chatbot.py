@@ -22,13 +22,18 @@ def _port_available(port: int, host: str = "0.0.0.0") -> bool:
 def _select_port() -> int:
     """Pick a usable port, preferring CHATBOT_PORT or settings.PORT."""
     preferred_port = int(os.getenv("CHATBOT_PORT", settings.PORT))
-    if preferred_port == 8001:
-        preferred_port = 8002
 
-    fallback_ports = [preferred_port, 8003, 8002, 8001, 8004]
+    # Always try to use the configured port first (8003)
+    if _port_available(preferred_port, settings.HOST):
+        return preferred_port
+
+    # Fallback only if preferred port is unavailable
+    fallback_ports = [8002, 8004, 8005]
     for port in fallback_ports:
         if _port_available(port, settings.HOST):
+            print(f"Warning: Port {preferred_port} unavailable, using {port}")
             return port
+
     return preferred_port
 
 

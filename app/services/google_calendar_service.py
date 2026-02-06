@@ -136,17 +136,19 @@ class GoogleCalendarService:
             else:
                 logger.warning(f"No timezone provided, defaulting to IST (Asia/Kolkata)")
 
-            start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
-            end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
+            # CRITICAL FIX: Send time WITHOUT offset, use timeZone field only
+            # This prevents issues where Google Calendar double-converts the timezone
+            # Format: 2026-02-09T11:00:00 (no offset) + timeZone: Asia/Kolkata
+            start_local = datetime.combine(appointment_date, start_time)
+            end_local = datetime.combine(appointment_date, end_time)
 
-            # Format for Google Calendar (RFC3339)
-            start_rfc3339 = start_datetime.isoformat()
-            end_rfc3339 = end_datetime.isoformat()
+            # Format as local time WITHOUT timezone offset
+            start_rfc3339 = start_local.strftime('%Y-%m-%dT%H:%M:%S')
+            end_rfc3339 = end_local.strftime('%Y-%m-%dT%H:%M:%S')
 
             # Enhanced debug logging for timezone troubleshooting
             logger.info(f"GCal CREATE: doctor={doctor_email}, date={appointment_date}")
-            logger.info(f"GCal CREATE: input_time={start_time}, timezone_param={timezone_name}, resolved_tz={tz}")
-            logger.info(f"GCal CREATE: start_datetime={start_datetime}, end_datetime={end_datetime}")
+            logger.info(f"GCal CREATE: input_time={start_time}, timezone={tz}")
             logger.info(f"GCal CREATE: rfc3339_start={start_rfc3339}, rfc3339_end={end_rfc3339}")
 
             event = {
@@ -154,7 +156,7 @@ class GoogleCalendarService:
                 'description': description or f'Appointment with {patient_name}',
                 'start': {
                     'dateTime': start_rfc3339,
-                    'timeZone': str(tz),
+                    'timeZone': str(tz),  # Google interprets start_rfc3339 in this timezone
                 },
                 'end': {
                     'dateTime': end_rfc3339,
@@ -249,15 +251,16 @@ class GoogleCalendarService:
             else:
                 logger.warning(f"No timezone provided for update, defaulting to IST (Asia/Kolkata)")
 
-            start_datetime = datetime.combine(appointment_date, start_time).replace(tzinfo=tz)
-            end_datetime = datetime.combine(appointment_date, end_time).replace(tzinfo=tz)
+            # CRITICAL FIX: Send time WITHOUT offset, use timeZone field only
+            start_local = datetime.combine(appointment_date, start_time)
+            end_local = datetime.combine(appointment_date, end_time)
 
-            start_rfc3339 = start_datetime.isoformat()
-            end_rfc3339 = end_datetime.isoformat()
+            start_rfc3339 = start_local.strftime('%Y-%m-%dT%H:%M:%S')
+            end_rfc3339 = end_local.strftime('%Y-%m-%dT%H:%M:%S')
 
             # Enhanced debug logging for timezone troubleshooting
-            logger.info(f"GCal UPDATE: event_id={event_id}, timezone_param={timezone_name}, resolved_tz={tz}")
-            logger.info(f"GCal UPDATE: start_datetime={start_datetime}, rfc3339={start_rfc3339}")
+            logger.info(f"GCal UPDATE: event_id={event_id}, timezone={tz}")
+            logger.info(f"GCal UPDATE: rfc3339_start={start_rfc3339}, rfc3339_end={end_rfc3339}")
 
             event['summary'] = f'Appointment: {patient_name}'
             event['description'] = description or f'Appointment with {patient_name}'

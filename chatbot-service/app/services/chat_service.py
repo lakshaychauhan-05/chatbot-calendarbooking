@@ -56,6 +56,16 @@ class ChatService:
         "reschedule_time"
     )
 
+    # Rule-based responses that skip LLM entirely (cost optimization)
+    GREETING_PATTERNS = re.compile(r'^(hi|hello|hey|good\s*(morning|afternoon|evening)|greetings?)\s*[!.,]?\s*$', re.I)
+    GREETING_RESPONSE = "Hello! How can I assist you today? I can help you book appointments, check availability, or provide information about our doctors."
+
+    THANKS_PATTERNS = re.compile(r'^(thanks?|thank\s*you|thx|tysm|appreciate)\s*[!.,]?\s*$', re.I)
+    THANKS_RESPONSE = "You're welcome! Is there anything else I can help you with?"
+
+    BYE_PATTERNS = re.compile(r'^(bye|goodbye|see\s*you|take\s*care|cya)\s*[!.,]?\s*$', re.I)
+    BYE_RESPONSE = "Goodbye! Take care and feel free to reach out if you need any help with appointments."
+
     def __init__(self):
         self.llm_service = LLMService()
         self.conversation_manager = ConversationManager()
@@ -69,6 +79,97 @@ class ChatService:
                 self._redis = None
         self._doctor_cache_key = "doctor_data_cache"
         self._doctor_cache_ttl_seconds = 300
+
+    def _try_rule_based_response(self, message: str) -> Optional[str]:
+        """Try to handle message with rule-based logic (no LLM call needed).
+
+        Returns response text if handled, None if LLM is needed.
+        This saves significant API costs for simple interactions.
+        """
+        msg = message.strip()
+
+        # Handle greetings
+        if self.GREETING_PATTERNS.match(msg):
+            return self.GREETING_RESPONSE
+
+        # Handle thanks
+        if self.THANKS_PATTERNS.match(msg):
+            return self.THANKS_RESPONSE
+
+        # Handle goodbye
+        if self.BYE_PATTERNS.match(msg):
+            return self.BYE_RESPONSE
+
+        return None
+
+    def _extract_entities_regex(self, message: str) -> Dict[str, str]:
+        """Extract common entities using regex (no LLM needed).
+
+        This pre-extracts entities to reduce LLM token usage and improve accuracy.
+        Returns a dict of entity_type -> value for entities found.
+        """
+        entities = {}
+        msg = message.strip()
+
+        # Phone number (Indian format: 10 digits, optionally with +91)
+        phone_match = re.search(r'(?:\+91[\s-]?)?([6-9]\d{9})\b', msg)
+        if phone_match:
+            entities['phone_number'] = phone_match.group(1)
+
+        # Email address
+        email_match = re.search(r'\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b', msg)
+        if email_match:
+            entities['email'] = email_match.group(1)
+
+        # Date patterns
+        msg_lower = msg.lower()
+
+        # Relative dates
+        if 'today' in msg_lower:
+            entities['date'] = 'today'
+        elif 'tomorrow' in msg_lower:
+            entities['date'] = 'tomorrow'
+        elif 'day after tomorrow' in msg_lower:
+            entities['date'] = 'day after tomorrow'
+
+        # Specific date: "9th feb", "feb 9", "9 february", "february 9th"
+        date_patterns = [
+            r'(\d{1,2})(?:st|nd|rd|th)?\s*(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)',
+            r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*(\d{1,2})(?:st|nd|rd|th)?',
+        ]
+        for pattern in date_patterns:
+            date_match = re.search(pattern, msg_lower)
+            if date_match:
+                entities['date'] = date_match.group(0)
+                break
+
+        # Time patterns: "11 am", "2:30 pm", "14:00", "at 3"
+        time_patterns = [
+            r'\b(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))\b',
+            r'\bat\s+(\d{1,2}(?::\d{2})?)\b',
+            r'\b(\d{1,2}:\d{2})\b',
+        ]
+        for pattern in time_patterns:
+            time_match = re.search(pattern, msg_lower)
+            if time_match:
+                entities['time'] = time_match.group(1)
+                break
+
+        # Patient name detection: "I am X", "my name is X", "this is X"
+        name_patterns = [
+            r"(?:i\s*(?:am|'m)|my\s*name\s*is|this\s*is|i'm)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)",
+            r'^([a-zA-Z]+)\s*[,]\s*\d{10}',  # "Laksh, 9634927054"
+        ]
+        for pattern in name_patterns:
+            name_match = re.search(pattern, msg, re.I)
+            if name_match:
+                potential_name = name_match.group(1).strip()
+                # Ensure it's not a common word
+                if potential_name.lower() not in ['here', 'there', 'fine', 'good', 'okay', 'yes', 'no']:
+                    entities['patient_name'] = potential_name.title()
+                    break
+
+        return entities
 
     async def process_message(self, request: ChatRequest) -> ChatResponse:
         """Process a user message and generate a response."""
@@ -93,6 +194,31 @@ class ChatService:
                 content=request.message,
                 metadata=request.metadata
             )
+
+            # COST OPTIMIZATION: Try rule-based response first (skips LLM entirely)
+            # Only apply when not in active booking flow
+            is_in_booking_flow = conversation and conversation.state in [
+                ConversationState.GATHERING_INFO,
+                ConversationState.CONFIRMING_BOOKING,
+                ConversationState.BOOKING_APPOINTMENT
+            ]
+            if not is_in_booking_flow:
+                rule_response = self._try_rule_based_response(request.message)
+                if rule_response:
+                    logger.info(f"Using rule-based response (LLM skipped) for: {request.message[:50]}")
+                    self.conversation_manager.add_message(
+                        conversation_id=conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=rule_response
+                    )
+                    return ChatResponse(
+                        conversation_id=conversation_id,
+                        message=rule_response,
+                        intent=None,
+                        suggested_actions=["book_appointment", "get_doctor_info", "check_availability"],
+                        requires_confirmation=False,
+                        booking_details=None
+                    )
 
             # Handle pending confirmation before intent classification
             pending_action = conversation.context.get("pending_action") if conversation else None
@@ -183,6 +309,21 @@ class ChatService:
                 ]
                 wants_to_break_out = any(phrase in message_lower for phrase in break_out_phrases)
 
+                # Check if user is asking a QUESTION (should not force booking intent)
+                # Patterns: "is X a dermatologist?", "what doctors do you have", "who is available"
+                question_patterns = [
+                    r'\bis\s+\w+.*\?',  # "is X a dermatologist?"
+                    r'\bwhat\s+doctor',  # "what doctors"
+                    r'\bwho\s+(?:is|are)',  # "who is/are"
+                    r'\bdo\s+you\s+have',  # "do you have"
+                    r'\bwhich\s+doctor',  # "which doctor"
+                    r'\btell\s+me\s+(?:about|more)',  # "tell me about/more"
+                    r'\bshow\s+me',  # "show me doctors"
+                    r'\blist\s+(?:all|doctor)',  # "list all doctors"
+                    r'\?$',  # ends with question mark
+                ]
+                is_asking_question = any(re.search(pat, message_lower) for pat in question_patterns)
+
                 # Check if user is asking for availability/slots/timings
                 availability_keywords = ["timing", "slot", "available", "availability", "when", "other time", "more time"]
                 is_asking_availability = any(kw in message_lower for kw in availability_keywords)
@@ -232,12 +373,19 @@ class ChatService:
                     IntentType.CANCEL_APPOINTMENT,
                     IntentType.RESCHEDULE_APPOINTMENT,
                     IntentType.CHECK_AVAILABILITY
-                ] and not is_asking_availability:
+                ] and not is_asking_availability and not is_asking_question:
+                    # Only force booking intent if user is NOT asking a question
                     logger.info(
                         "Forcing booking intent due to active booking state",
                         extra={"conversation_id": conversation_id}
                     )
                     intent_classification.intent = IntentType.BOOK_APPOINTMENT
+                elif is_asking_question:
+                    # User is asking a question - allow natural intent detection
+                    logger.info(f"User asking question during booking flow, allowing natural intent: {intent_classification.intent}")
+                    # If they're asking about doctors, set to GET_DOCTOR_INFO
+                    if any(kw in message_lower for kw in ['doctor', 'dermatologist', 'specialist', 'cardiologist', 'available']):
+                        intent_classification.intent = IntentType.GET_DOCTOR_INFO
                 elif is_asking_availability:
                     # User wants to check other slots, switch to availability intent
                     intent_classification.intent = IntentType.CHECK_AVAILABILITY
@@ -396,8 +544,28 @@ class ChatService:
         previous_doctor_name = booking_context.get("doctor_name")
         previous_selected_email = booking_context.get("selected_doctor_email")
 
-        # Extract booking details from entities and fallback parsing
+        # COST OPTIMIZATION: Extract entities using regex first (no LLM needed)
+        # This provides faster, more accurate extraction for phone/email/date/time
+        regex_entities = self._extract_entities_regex(message)
+        logger.debug(f"Regex-extracted entities: {regex_entities}")
+
+        # Extract booking details from LLM entities
         extracted = self._extract_booking_details_from_entities(intent.entities)
+
+        # Merge regex entities (higher priority for phone/date/time - more reliable)
+        if regex_entities.get("phone_number") and not extracted.get("patient_phone"):
+            extracted["patient_phone"] = regex_entities["phone_number"]
+        if regex_entities.get("email") and not extracted.get("patient_email"):
+            extracted["patient_email"] = regex_entities["email"]
+        if regex_entities.get("date") and not extracted.get("date"):
+            extracted["date"] = regex_entities["date"]
+        if regex_entities.get("time") and not extracted.get("time"):
+            extracted["time"] = regex_entities["time"]
+        if regex_entities.get("patient_name") and not extracted.get("patient_name"):
+            # Only use regex patient_name if it's not a doctor name
+            potential_name = regex_entities["patient_name"]
+            if not self._match_doctor_name_in_message(potential_name, doctor_data):
+                extracted["patient_name"] = potential_name
         explicit_doctor_name = self._match_doctor_name_in_message(message, doctor_data)
 
         # Check if user is asking for MORE INFO about a doctor, not selecting them
@@ -2418,19 +2586,45 @@ class ChatService:
 
         Uses exact matching first, then fuzzy matching for typo tolerance.
         Examples: "navven" -> "naveen", "kapor" -> "kapoor"
+
+        IMPORTANT: Only applies fuzzy matching when message context suggests
+        the user is referring to a doctor (contains "dr", "doctor", "book with",
+        "appointment with", "about", etc.)
         """
         if not message:
             return None
         normalized_message = self._normalize_match_text(message)
+        message_lower = message.lower()
 
-        # First pass: exact match
+        # First pass: exact match (always safe)
         for doctor in doctor_data:
             name = doctor.get("name")
             if name and self._normalize_doctor_name(name) in normalized_message:
                 return name
 
+        # Check if message context suggests doctor reference before fuzzy matching
+        # This prevents matching patient names like "laksh" to doctor "lakshay"
+        doctor_reference_patterns = [
+            r'\bdr\.?\s*\w+', r'\bdoctor\s+\w+', r'\bbook\s+(?:with|an?\s+appointment)',
+            r'\babout\s+\w+', r'\btell\s+me\s+(?:about|more)', r'\bwho\s+is\b',
+            r'\bappointment\s+with\b', r'\bsee\s+\w+', r'\bwith\s+him\b', r'\bwith\s+her\b'
+        ]
+        is_doctor_reference = any(re.search(pat, message_lower) for pat in doctor_reference_patterns)
+
+        # Skip fuzzy matching if this looks like patient info (name + phone pattern)
+        # Pattern: word followed by digits (e.g., "laksh, 9634927054")
+        is_patient_info = bool(re.search(r'\b[a-zA-Z]+\s*[,\s]\s*\d{10,}', message))
+
+        if is_patient_info:
+            logger.debug(f"Skipping fuzzy match - detected patient info pattern: {message}")
+            return None
+
+        if not is_doctor_reference:
+            logger.debug(f"Skipping fuzzy match - no doctor reference context: {message}")
+            return None
+
         # Second pass: fuzzy match for typos (e.g., "navven" -> "naveen")
-        message_words = re.findall(r'[a-zA-Z]+', message.lower())
+        message_words = re.findall(r'[a-zA-Z]+', message_lower)
         doctor_first_names = []
         doctor_name_map = {}
 
@@ -2444,8 +2638,9 @@ class ChatService:
             doctor_name_map[first_name] = name
 
         for word in message_words:
-            if len(word) >= 3:  # Only check words with 3+ characters
-                matches = get_close_matches(word, doctor_first_names, n=1, cutoff=0.7)
+            # Increased cutoff from 0.7 to 0.85 for stricter matching
+            if len(word) >= 4:  # Require 4+ characters for fuzzy match
+                matches = get_close_matches(word, doctor_first_names, n=1, cutoff=0.85)
                 if matches:
                     matched_first_name = matches[0]
                     logger.info(f"Fuzzy matched '{word}' -> '{matched_first_name}'")
