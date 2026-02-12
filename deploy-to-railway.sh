@@ -57,12 +57,65 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# Push to git
+# Push to GitHub with token support
 echo ""
 echo "📤 Pushing to GitHub..."
-git push origin $BRANCH
 
-echo -e "${GREEN}✅ Pushed to GitHub${NC}"
+# Get repository info
+REPO_URL=$(git remote get-url origin)
+
+# Function to push with token
+push_with_token() {
+    echo ""
+    echo -e "${YELLOW}🔑 GitHub Personal Access Token Required${NC}"
+    echo ""
+    echo "Create a token at: https://github.com/settings/tokens"
+    echo "Required scope: 'repo'"
+    echo ""
+    read -sp "Enter your GitHub token (or press Enter to skip): " GITHUB_TOKEN
+    echo ""
+
+    if [[ -z "$GITHUB_TOKEN" ]]; then
+        echo -e "${RED}❌ No token provided${NC}"
+        return 1
+    fi
+
+    # Extract username and repo from URL
+    if [[ $REPO_URL =~ github.com[:/]([^/]+)/([^/.]+) ]]; then
+        USERNAME="${BASH_REMATCH[1]}"
+        REPO="${BASH_REMATCH[2]}"
+
+        # Construct authenticated URL
+        AUTH_URL="https://${GITHUB_TOKEN}@github.com/${USERNAME}/${REPO}.git"
+
+        # Push using token
+        if git push "$AUTH_URL" "$BRANCH" 2>&1 | grep -v "$GITHUB_TOKEN"; then
+            echo -e "${GREEN}✅ Pushed to GitHub with token${NC}"
+            return 0
+        else
+            echo -e "${RED}❌ Push with token failed${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}❌ Could not parse repository URL${NC}"
+        return 1
+    fi
+}
+
+# Try regular push first
+if git push origin $BRANCH 2>&1; then
+    echo -e "${GREEN}✅ Pushed to GitHub${NC}"
+else
+    echo -e "${YELLOW}⚠️  Regular push failed, trying with token...${NC}"
+    if ! push_with_token; then
+        echo ""
+        echo "Alternative methods:"
+        echo "  1. Run: ./push-with-token.sh"
+        echo "  2. Configure SSH: ssh-keygen && add key to GitHub"
+        echo "  3. Use GitHub CLI: gh auth login"
+        exit 1
+    fi
+fi
 echo ""
 
 # Display next steps
