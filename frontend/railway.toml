@@ -2,10 +2,11 @@
 # Unified React frontend with Chatbot + Doctor Portal + Admin Portal
 
 [build]
-builder = "dockerfile"
+builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
+startCommand = "nginx -g 'daemon off;'"
 healthcheckPath = "/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
