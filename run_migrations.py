@@ -8,19 +8,26 @@ import os
 
 def run_migrations():
     """Run Alembic migrations."""
-    
+
     print("=" * 50)
     print("Database Migration Script")
     print("=" * 50)
     print()
-    
-    # Check if .env file exists
-    if not os.path.exists('.env'):
-        print("ERROR: .env file not found!")
-        print("Please create .env file from env.example")
-        return False
 
-    print("Found .env file")
+    # Check if .env file exists (optional - Railway uses env variables)
+    if os.path.exists('.env'):
+        print("Found .env file (local development)")
+    else:
+        # Check if DATABASE_URL is set via environment variable (Railway)
+        if os.getenv('DATABASE_URL'):
+            print("Using DATABASE_URL from environment (Railway deployment)")
+        else:
+            print("WARNING: No .env file and no DATABASE_URL environment variable!")
+            print("For local development: create .env file from env.example")
+            print("For Railway: DATABASE_URL is set automatically")
+            # Don't fail - let Alembic try and report the actual error
+            print()
+            print("Attempting to run migrations anyway...")
 
     # Check if alembic.ini exists
     if not os.path.exists('alembic.ini'):
