@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # ===========================================
     # DOCTOR PORTAL AUTHENTICATION
     # ===========================================
-    DOCTOR_PORTAL_JWT_SECRET: str
+    DOCTOR_PORTAL_JWT_SECRET: str = "change-me-in-production"  # Required for running, but has default for migrations
     DOCTOR_PORTAL_JWT_ALGORITHM: str = "HS256"
     DOCTOR_PORTAL_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     DOCTOR_PORTAL_REFRESH_TOKEN_EXPIRE_MINUTES: int = 43200  # 30 days
@@ -61,10 +61,10 @@ class Settings(BaseSettings):
     # ===========================================
     # ADMIN PORTAL AUTHENTICATION
     # ===========================================
-    ADMIN_PORTAL_JWT_SECRET: str
+    ADMIN_PORTAL_JWT_SECRET: str = "change-me-in-production"  # Required for running, but has default for migrations
     ADMIN_PORTAL_JWT_ALGORITHM: str = "HS256"
     ADMIN_PORTAL_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-    ADMIN_EMAIL: str
+    ADMIN_EMAIL: str = "admin@example.com"  # Required for running, but has default for migrations
     ADMIN_PASSWORD_HASH: Optional[str] = None
     ADMIN_PASSWORD: Optional[str] = None  # convenience for local dev; hash preferred
 

@@ -11,9 +11,21 @@ import sys
 # Add parent directory to path to import app modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-# Import app models and database
+# Get DATABASE_URL from environment (don't load full settings)
+# This prevents requiring all env vars just for migrations
+database_url = os.getenv('DATABASE_URL')
+if not database_url:
+    # Fallback: try to load from settings if .env exists
+    try:
+        from app.config import settings
+        database_url = settings.DATABASE_URL
+    except Exception as e:
+        print(f"ERROR: Could not get DATABASE_URL: {e}")
+        print("Please set DATABASE_URL environment variable or create .env file")
+        sys.exit(1)
+
+# Import app models and database (after we have DATABASE_URL)
 from app.database import Base
-from app.config import settings
 # Import all models so Alembic can detect them
 from app.models.doctor import Doctor
 from app.models.patient import Patient
@@ -28,8 +40,8 @@ from app.models.clinic import Clinic
 # access to the values within the .ini file in use.
 config = context.config
 
-# Override sqlalchemy.url with settings from environment
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Override sqlalchemy.url with DATABASE_URL from environment
+config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

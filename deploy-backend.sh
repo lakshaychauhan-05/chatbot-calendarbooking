@@ -1,18 +1,12 @@
 #!/bin/bash
 
-# Deploy to Railway - Quick Deployment Script
-# This script helps you deploy the Calendar Booking Platform to Railway
+# Deploy Backend to Railway
+# This script deploys only the backend service
 
 set -e
 
-echo "🚀 Railway Deployment Helper"
-echo "============================"
-echo ""
-echo "This script deploys BOTH frontend and backend."
-echo ""
-echo "To deploy individually, use:"
-echo "  • Backend only:  ./deploy-backend.sh"
-echo "  • Frontend only: ./deploy-frontend.sh"
+echo "🚀 Railway Backend Deployment"
+echo "=============================="
 echo ""
 
 # Colors
@@ -56,7 +50,7 @@ echo -e "${BLUE}Current branch: $BRANCH${NC}"
 echo ""
 
 # Ask for confirmation
-read -p "Deploy branch '$BRANCH' to Railway? (y/n) " -n 1 -r
+read -p "Deploy backend from branch '$BRANCH' to Railway? (y/n) " -n 1 -r
 echo ""
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Deployment cancelled."
@@ -124,37 +118,67 @@ else
 fi
 echo ""
 
-# Display next steps
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🎯 Next Steps:"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "1. Railway will now automatically detect and deploy your changes"
-echo ""
-echo "2. Monitor your deployment:"
-echo "   ${BLUE}Backend logs:${NC}  railway link --service backend && railway logs"
-echo "   ${BLUE}Frontend logs:${NC} railway link --service frontend && railway logs"
-echo ""
-echo "3. Check deployment status:"
-echo "   ${BLUE}Dashboard:${NC} https://railway.com/project/c4f571ad-e818-43ad-8b3e-87d0c7240b76"
-echo ""
-echo "4. Verify services are healthy:"
-echo "   ${BLUE}Backend:${NC}  curl https://your-backend-domain.up.railway.app/health"
-echo "   ${BLUE}Frontend:${NC} Open https://your-frontend-domain.up.railway.app in browser"
+# Link to backend service
+echo -e "${BLUE}Linking to backend service...${NC}"
+railway link --service backend 2>/dev/null || echo -e "${YELLOW}Service already linked or needs manual linking${NC}"
+
+# Display deployment info
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🎯 Backend Deployment Started"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo -e "${GREEN}🎉 Deployment initiated successfully!${NC}"
+echo -e "${GREEN}✅ Code pushed to GitHub${NC}"
+echo -e "${BLUE}⏳ Railway is building and deploying backend...${NC}"
 echo ""
-echo "📖 For detailed setup instructions, see: RAILWAY_DEPLOYMENT_UNIFIED.md"
+echo "What's being deployed:"
+echo "  • FastAPI Backend (Port: \$PORT)"
+echo "  • Core Calendar API (/api/v1/*)"
+echo "  • Doctor Portal API (/portal/*)"
+echo "  • Admin Portal API (/admin/*)"
+echo "  • Chatbot API (/chatbot/api/v1/*)"
+echo "  • Database migrations (automatic)"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📊 Monitor Deployment"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "View logs:"
+echo "  ${BLUE}railway logs --follow${NC}"
+echo ""
+echo "Check status:"
+echo "  ${BLUE}railway status${NC}"
+echo ""
+echo "Open dashboard:"
+echo "  ${BLUE}railway open${NC}"
+echo "  Or visit: https://railway.com/project/c4f571ad-e818-43ad-8b3e-87d0c7240b76"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ Verify Deployment"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Once deployed, test backend health:"
+echo "  ${BLUE}curl https://your-backend-domain.up.railway.app/health${NC}"
+echo ""
+echo "View API docs:"
+echo "  ${BLUE}https://your-backend-domain.up.railway.app/docs${NC}"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 # Ask if user wants to watch logs
-read -p "Do you want to watch backend deployment logs? (y/n) " -n 1 -r
+read -p "Do you want to watch backend deployment logs now? (y/n) " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo "Linking to backend service..."
-    railway link --service backend 2>/dev/null || echo "Service already linked or not found"
-    echo "Following logs (Press Ctrl+C to exit)..."
+    echo ""
+    echo -e "${BLUE}Following backend logs (Press Ctrl+C to exit)...${NC}"
+    echo ""
+    sleep 2
     railway logs --follow
+else
+    echo ""
+    echo -e "${GREEN}🎉 Backend deployment initiated!${NC}"
+    echo ""
+    echo "Watch logs later with: ${BLUE}railway link --service backend && railway logs --follow${NC}"
+    echo ""
 fi
