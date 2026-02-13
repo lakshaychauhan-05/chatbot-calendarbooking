@@ -1,0 +1,89 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Environment files
+.env
+.env.*
+!.env.docker
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Documentation
+*.md
+!README.md
+docs/
+*.txt
+!requirements.txt
+
+# Logs
+logs/
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.run/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Node modules (frontend builds in its own Dockerfile)
+node_modules/
+frontend/node_modules/
+chatbot-frontend/
+doctor-portal-frontend/
+admin-portal-frontend/
+chatbot-service/
+admin_portal/
+doctor_portal/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Scripts
+*.ps1
+*.sh
+!deploy-docker.sh
+!docker-entrypoint.sh
+
+# Other services
+calendar-service/
+Dockerfile.calendar
+
+# Railway specific
+railway.toml
+RAILWAY_*.md
+deploy-*.sh
+!deploy-docker.sh
+push-with-token.sh
+
+# Credentials (mount as volume instead)
+credentials/*.json
+
+# Alembic versions (included but might want to exclude in some cases)
+# alembic/versions/

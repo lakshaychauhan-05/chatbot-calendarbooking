@@ -9,8 +9,10 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci
+# Clean npm cache and install dependencies
+# Use --legacy-peer-deps to handle peer dependency conflicts
+RUN npm cache clean --force && \
+    npm install --legacy-peer-deps --no-audit
 
 # Copy source code
 COPY . .

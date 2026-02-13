@@ -1,32 +1,20 @@
 version: '3.8'
 
-services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: calendar_booking
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5433:5432"  # Use 5433 on host to avoid conflict with local PostgreSQL
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+# Docker Compose configuration using LOCAL PostgreSQL database with HOST NETWORK
+# Your existing database: localhost:5432, calendar_booking_db, password: admin123
+# Usage: docker compose -f docker-compose.host-network.yml up -d
 
+services:
   # Unified Backend API
-  # Includes: Core Calendar API + Doctor Portal + Admin Portal + Chatbot
+  # Uses host network to access local PostgreSQL directly
   backend:
     build:
       context: .
       dockerfile: Dockerfile
+    network_mode: "host"
     environment:
-      # Database
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/calendar_booking
+      # Database - Direct connection to localhost:5432
+      DATABASE_URL: postgresql+psycopg://postgres:admin123@localhost:5432/calendar_booking_db
 
       # Server
       PORT: 8000
@@ -65,36 +53,17 @@ services:
 
       # CORS
       CORS_ALLOW_ORIGINS: http://localhost:5173,http://localhost:3000
-    ports:
-      - "8000:8000"
     volumes:
       - ./credentials:/app/credentials:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   # Unified Frontend
-  # Includes: Chatbot + Doctor Portal + Admin Portal
+  # Also uses host network for simplicity
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_API_URL: http://localhost:8000
-    ports:
-      - "5173:80"
-    depends_on:
-      - backend
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    network_mode: "host"
 
-volumes:
-  postgres_data:
+# No volumes needed - using host database

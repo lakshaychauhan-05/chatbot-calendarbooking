@@ -1,23 +1,10 @@
 version: '3.8'
 
-services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: calendar_booking
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5433:5432"  # Use 5433 on host to avoid conflict with local PostgreSQL
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+# Docker Compose configuration using LOCAL PostgreSQL database
+# Your existing database: localhost:5432, calendar_booking_db, password: admin123
+# Usage: docker compose -f docker-compose.local-db.yml up -d
 
+services:
   # Unified Backend API
   # Includes: Core Calendar API + Doctor Portal + Admin Portal + Chatbot
   backend:
@@ -25,8 +12,9 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      # Database
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/calendar_booking
+      # Database - Connect to host machine's PostgreSQL
+      # Use host.docker.internal to access host machine from Docker
+      DATABASE_URL: postgresql+psycopg://postgres:admin123@host.docker.internal:5432/calendar_booking_db
 
       # Server
       PORT: 8000
@@ -42,7 +30,7 @@ services:
       DOCTOR_PORTAL_JWT_SECRET: ${DOCTOR_PORTAL_JWT_SECRET:-doctor-jwt-secret-dev}
       DOCTOR_PORTAL_JWT_ALGORITHM: HS256
       DOCTOR_PORTAL_OAUTH_CLIENT_ID: ${DOCTOR_PORTAL_OAUTH_CLIENT_ID:-}
-      DOCTOR_PORTAL_OAUTH_CLIENT_SECRET: ${DOCTOR_PORTAL_OAUTH_CLIENT_SECRET:-}
+      DOCKER_PORTAL_OAUTH_CLIENT_SECRET: ${DOCTOR_PORTAL_OAUTH_CLIENT_SECRET:-}
       DOCTOR_PORTAL_OAUTH_REDIRECT_URI: ${DOCTOR_PORTAL_OAUTH_REDIRECT_URI:-http://localhost:8000/portal/auth/oauth/google/callback}
       DOCTOR_PORTAL_FRONTEND_CALLBACK_URL: ${DOCTOR_PORTAL_FRONTEND_CALLBACK_URL:-http://localhost:5173/doctor/oauth/callback}
 
@@ -69,14 +57,17 @@ services:
       - "8000:8000"
     volumes:
       - ./credentials:/app/credentials:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # Remove postgres dependency since we're using host database
+    # No depends_on needed
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
+    # Add extra_hosts for Linux to enable host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # Unified Frontend
   # Includes: Chatbot + Doctor Portal + Admin Portal
@@ -96,5 +87,4 @@ services:
       timeout: 10s
       retries: 3
 
-volumes:
-  postgres_data:
+# No volumes needed since we're using host database

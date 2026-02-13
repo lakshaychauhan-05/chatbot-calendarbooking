@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
     curl \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -21,6 +22,10 @@ COPY alembic/ ./alembic/
 COPY alembic.ini .
 COPY run.py .
 COPY run_migrations.py .
+COPY docker-entrypoint.sh .
+
+# Make entrypoint executable
+RUN chmod +x docker-entrypoint.sh
 
 # Create credentials directory (will be populated via env vars or volume mount)
 RUN mkdir -p ./credentials
@@ -33,8 +38,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
 # Run migrations and start server
-CMD python run_migrations.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD ["./docker-entrypoint.sh"]

@@ -1,5 +1,9 @@
 version: '3.8'
 
+# Docker Compose for Windows Deployment
+# Custom ports: Backend 8005, Frontend 5168
+# Usage: docker compose -f docker-compose.windows.yml up -d
+
 services:
   # PostgreSQL Database
   postgres:
@@ -17,6 +21,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   # Unified Backend API
   # Includes: Core Calendar API + Doctor Portal + Admin Portal + Chatbot
@@ -28,8 +33,8 @@ services:
       # Database
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/calendar_booking
 
-      # Server
-      PORT: 8000
+      # Server - Custom port 8005
+      PORT: 8005
       DEBUG: ${DEBUG:-false}
       DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-Asia/Kolkata}
 
@@ -43,8 +48,8 @@ services:
       DOCTOR_PORTAL_JWT_ALGORITHM: HS256
       DOCTOR_PORTAL_OAUTH_CLIENT_ID: ${DOCTOR_PORTAL_OAUTH_CLIENT_ID:-}
       DOCTOR_PORTAL_OAUTH_CLIENT_SECRET: ${DOCTOR_PORTAL_OAUTH_CLIENT_SECRET:-}
-      DOCTOR_PORTAL_OAUTH_REDIRECT_URI: ${DOCTOR_PORTAL_OAUTH_REDIRECT_URI:-http://localhost:8000/portal/auth/oauth/google/callback}
-      DOCTOR_PORTAL_FRONTEND_CALLBACK_URL: ${DOCTOR_PORTAL_FRONTEND_CALLBACK_URL:-http://localhost:5173/doctor/oauth/callback}
+      DOCTOR_PORTAL_OAUTH_REDIRECT_URI: ${DOCTOR_PORTAL_OAUTH_REDIRECT_URI:-http://localhost:8005/portal/auth/oauth/google/callback}
+      DOCTOR_PORTAL_FRONTEND_CALLBACK_URL: ${DOCTOR_PORTAL_FRONTEND_CALLBACK_URL:-http://localhost:5168/doctor/oauth/callback}
 
       # Admin Portal Auth
       ADMIN_PORTAL_JWT_SECRET: ${ADMIN_PORTAL_JWT_SECRET:-admin-jwt-secret-dev}
@@ -63,20 +68,22 @@ services:
       GOOGLE_CALENDAR_CREDENTIALS_PATH: ${GOOGLE_CALENDAR_CREDENTIALS_PATH:-}
       GOOGLE_CALENDAR_DELEGATED_ADMIN_EMAIL: ${GOOGLE_CALENDAR_DELEGATED_ADMIN_EMAIL:-}
 
-      # CORS
-      CORS_ALLOW_ORIGINS: http://localhost:5173,http://localhost:3000
+      # CORS - Updated for custom frontend port
+      CORS_ALLOW_ORIGINS: http://localhost:5168,http://localhost:3000
     ports:
-      - "8000:8000"
+      - "8005:8005"  # Custom backend port
     volumes:
       - ./credentials:/app/credentials:ro
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
+    restart: unless-stopped
 
   # Unified Frontend
   # Includes: Chatbot + Doctor Portal + Admin Portal
@@ -85,9 +92,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: http://localhost:8000
+        VITE_API_URL: http://localhost:8005  # Updated for custom backend port
     ports:
-      - "5173:80"
+      - "5168:80"  # Custom frontend port
     depends_on:
       - backend
     healthcheck:
@@ -95,6 +102,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: unless-stopped
 
 volumes:
   postgres_data:
