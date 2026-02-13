@@ -24,8 +24,8 @@ COPY run.py .
 COPY run_migrations.py .
 COPY docker-entrypoint.sh .
 
-# Make entrypoint executable
-RUN chmod +x docker-entrypoint.sh
+# Fix Windows line endings (CRLF -> LF) and make entrypoint executable
+RUN sed -i 's/\r$//' docker-entrypoint.sh && chmod +x docker-entrypoint.sh
 
 # Create credentials directory (will be populated via env vars or volume mount)
 RUN mkdir -p ./credentials

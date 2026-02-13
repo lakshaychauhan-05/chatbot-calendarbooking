@@ -26,7 +26,7 @@ COPY --from=builder /app/build /usr/share/nginx/html
 
 # Add script to inject environment variables at runtime
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+RUN sed -i 's/\r$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
 
 # Expose port (Railway sets PORT env var)
 EXPOSE 80
